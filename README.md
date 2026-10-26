@@ -7,7 +7,7 @@ Python downloads and launches the official Android Emulator (QEMU); this project
 ## Current capabilities
 
 - Install official Android command-line tools, emulator and an Android 11 Google Play x86_64 image.
-- Launch a two-core, 2 GB RAM virtual device.
+- Launch a two-core, 2 GB RAM virtual device with a 720 × 1280 display and software graphics.
 - Capture the game through ADB and calibrate movement and attack controls visually.
 - Start a tabular Q policy from zero, explore actions, learn from positive and negative human feedback, and resume saved learning.
 - Annotate objects with English labels and normalized bounding boxes for a future detector.
@@ -21,6 +21,22 @@ Linux x86_64, Python 3.11+, Java 17+, Tkinter, internet access for setup, and wo
 This baseline trains on CPU. The emulator still consumes several GB of disk space locally; keeping Git small does not remove that requirement.
 
 ## Start
+
+To prepare the environment and launch both the emulator and teaching console:
+
+```bash
+bash train.sh
+```
+
+Choose an initial brawler and mode with optional arguments:
+
+```bash
+bash train.sh --brawler "Colt" --mode "Gem Grab"
+```
+
+The script installs Android on the first run, waits for you to open the game's training area, and then opens the teaching console. Run it from a desktop terminal with no other Android emulator running. Close the emulator window separately when finished. Subsequent runs reuse the virtual environment and Android installation. Android SDK licenses still require interactive acceptance.
+
+Alternatively, run the commands individually:
 
 Run these commands from a normal desktop terminal in the project directory:
 
@@ -37,6 +53,10 @@ Setup downloads several GB into `~/.cache/brawl-ai`. Android SDK license accepta
 
 If `doctor` reports inaccessible KVM, enable hardware virtualization in firmware and configure access to `/dev/kvm` on the host. Restart your login session after changes to group membership. A restricted sandbox may hide KVM even when it works on the host. The launcher fails clearly rather than silently attempting unusably slow software emulation.
 
+If Linux reports that the emulator window is not responding, close that window before restarting. The launcher now uses software graphics to avoid host GPU driver problems and starts ADB before Android. CPU virtualization still uses KVM. The smaller display reduces rendering work; recalibrate game controls after this resolution change. Existing Android data and training profiles are preserved. This configuration is a troubleshooting measure, not a verified fix for every freeze.
+
+Software graphics can be slower. To compare hardware rendering, close the emulator and run `python -m brawl_ai emulator --gpu host` (or `--gpu auto`). See Android's [graphics acceleration documentation](https://developer.android.com/studio/run/emulator-acceleration). Logs from `train.sh` are stored at `~/.cache/brawl-ai/emulator.log` (or under `BRAWL_AI_HOME`).
+
 Open Google Play inside Android and install Brawl Stars yourself. Game compatibility with the emulator, image, architecture and current game version must be checked on the actual device; it is not guaranteed. A legally obtained local APK can alternatively be installed with:
 
 ```bash
@@ -47,10 +67,54 @@ The APK command handles a single APK, not split bundles, XAPK files or missing g
 
 ## Teach and train
 
+### Physical Android phone over USB
+
+Instead of the emulator, connect an Android phone using a USB data cable. Enable Developer options and USB debugging, unlock the phone, and accept the computer's debugging authorization on the phone. See the official [USB device setup](https://developer.android.com/studio/run/device) instructions. ADB must be installed (the project's cached platform-tools or `adb` on PATH); Java, KVM and an Android system image are not needed for this mode. iPhones are not supported.
+
+Open Brawl Stars on the phone in landscape orientation and enter the training area, then run:
+
+```bash
+bash train.sh --usb
+# Or, with the virtual environment already prepared:
+python -m brawl_ai teach --usb --brawler "Shelly" --mode "Training Ground"
+```
+
+Place `--usb` first when using `train.sh`. Connect exactly one authorized USB phone; selection fails if none or multiple are available. An emulator is never selected by USB mode. You can alternatively target a known device using `python -m brawl_ai teach --serial DEVICE_SERIAL`.
+
+The console captures screenshots and sends taps/swipes through ADB; it is not a continuous video mirror. Click **Capture** and recalibrate movement and attack for the phone's screen before stepping. Keep the phone unlocked with the game in the foreground. Existing profile learning is reused. If authorization fails, check the prompt on the phone; if Linux reports insufficient permissions, configure the distribution's Android USB udev rules. Physical-device gameplay and input compatibility still require manual verification on the connected phone.
+
 Keep the emulator open. In a second terminal with the virtual environment activated:
 
 ```bash
 python -m brawl_ai teach --serial emulator-5554
+```
+
+### Brawler and mode profiles
+
+The console automatically recommends a **brawler, mode and exercise**, with an explanation. Recommendations refresh at startup, after switching profiles, every 20 committed transitions and at episode end. **Refresh recommendation** updates it on demand; **Load recommended profile** opens the suggested profile using the normal safe switching rules. You still select the matching brawler and mode manually in the game.
+
+The recommendation starts with 20 nonzero-feedback actions in the active brawler's Training Ground, then asks for 30 rated actions in the selected profile. After this initial coverage, it prioritizes saved profiles with less than 60% positive feedback among their last 50 rated actions, otherwise a least-reviewed saved profile. Only the active brawler's basics and profiles you have created are considered. Zero-reward steps do not count as reviewed. These thresholds organize practice; they do not establish mastery or measure win rate. Object annotations are not treated as evidence of learned recognition.
+
+You can also inspect the next suggestion without opening Android or the GUI:
+
+```bash
+python -m brawl_ai recommend --brawler "Colt" --mode "Gem Grab"
+```
+
+Each brawler/mode combination has an independent policy, exploration progress, reward history and annotation dataset. New combinations start from zero; switching back resumes their saved learning. The default is `Shelly` / `Training Ground`.
+
+Use the editable **Brawler** and **Mode** selectors and click **Load / create profile**. The brawler menu includes all 108 released brawlers, checked against [Brawlify's roster](https://brawlify.com/brawlers) on October 26, 2026, plus previously saved custom names. The mode menu contains example modes and previously saved names. You can type any brawler or mode, including future releases and temporary events. Names are case-insensitive and repeated spaces are normalized. The active profile is displayed separately from the editable fields.
+
+Switching pauses training and commits any pending reward to the old profile as an episode boundary. It clears the old frame and requires a new capture. Wait for an in-flight device operation to complete before switching. Control calibration is shared between profiles. Select the matching brawler and mode in the actual game yourself; the profile selector does not navigate the game or detect your selection.
+
+The mode menu includes Solo Showdown, Duo Showdown, Trio Showdown, Brawl Ball, Gem Grab, Knockout, Heist, Hot Zone, Brawl Hockey, Basket Brawl, Wipeout, Knockout 5v5, Brawl Ball 5v5, Wipeout 5v5, Duels, Bounty and Brawl Arena, plus Training Ground for basic practice. Each variant has an independent policy.
+
+The learning algorithm and action set remain the same for all profiles. Recommendations provide suggested exercises for these modes, but rewards still come from your feedback. Mode selection does not add automatic objective detection, ball/puck interactions or new controls. Object labels remain saved annotations rather than a trained detector.
+
+To select a profile directly without the launcher:
+
+```bash
+python -m brawl_ai teach --brawler "Shelly" --mode "Solo Showdown"
 ```
 
 1. Open the game and enter its training area manually. Use landscape orientation.
@@ -63,6 +127,14 @@ python -m brawl_ai teach --serial emulator-5554
 
 Closing the console commits the last completed transition and saves the policy. ADB operations run in a background thread so the interface can respond. Device commands time out after 15 seconds. Capture errors stop continuous stepping.
 
+### Super, gadget, hypercharge and reward sizes
+
+Pause, capture a frame, then use **Calibrate super**, **Calibrate gadget** or **Calibrate hypercharge** and click the corresponding button center in the preview. You can teach these controls gradually: an optional ability is excluded from AI choices until calibrated. Set **Super input** and **Gadget input** to `tap` for button activation/auto-aim, or `drag` for directional aiming. Drag mode exposes four separate actions (up, down, left, right), using a swipe of 10% of the smaller screen dimension. Hypercharge uses a tap. This does not detect charge, remaining gadget uses or ability availability in the game; feedback must teach when an action is useful. Live ability behavior has not yet been verified on a physical device.
+
+Calibration and super input mode are shared across profiles; recalibrate when the layout changes. Gadget input is saved separately for each brawler, shared across that brawler's game modes. On first opening a brawler without a saved gadget setting, the console asks whether the equipped gadget requires dragging. Answer Yes for drag or No for tap. Change this later using **Gadget input**, including when equipping a different gadget. Previously shared gadget settings are not assumed correct for a new brawler. Existing policies retain their learned values for the original actions; newly added actions start at zero.
+
+Enter a number under **Custom reward** and click **Add reward** after an AI step, for example `0.2` for a small improvement, `10` for completing an exercise, or `-5` for a mistake. Each click adds to the visible pending reward, including the existing +1/-1 buttons. **Clear pending reward** resets that sum before it is committed. Feedback applies to the most recently completed action, and is committed on the next step or episode end. Pause for more time to assess and reward an action. Larger magnitudes produce larger Q-value updates; recommendations still count positive/negative feedback rather than interpreting magnitude as mastery.
+
 ## Local storage and Git
 
 Default layout:
@@ -74,15 +146,18 @@ Default layout:
   android/                  # Android user configuration
   training/
     controls.json           # Normalized control coordinates and calibration status
-    policy.json             # Q values and transition count
-    transitions.jsonl       # State/action/reward/next-state/terminal records
-    annotations.jsonl       # Image filenames, labels, normalized xyxy boxes
-    frame-*.png             # Annotated screenshots
+    profiles/
+      <brawler-key>/<mode-key>/
+        profile.json        # Original brawler and mode names
+        policy.json         # Q values and transition count for this combination
+        transitions.jsonl   # Transitions, rewards and profile names
+        annotations.jsonl   # Image filenames, labels, normalized xyxy boxes
+        frame-*.png         # Annotated screenshots for this combination
 ```
 
 Override the location with `BRAWL_AI_HOME=/absolute/path` in every terminal using the tools. Prefer a directory outside the repository. The `.gitignore` also excludes common SDK, image, dataset and model paths. Do not force-add these assets to Git. Screenshots, game data and Android account state remain local. There is no automatic Git push or upload.
 
-The policy is persisted as JSON after each transition. To start learning over, close the console and move `training/policy.json` aside. This preserves annotations and control calibration.
+The policy is persisted as JSON after each transition. To start one profile over, close the console and move its `policy.json` aside. This preserves annotations, other profiles and control calibration. Models and datasets from the earlier unprofiled version in `training/` remain untouched and are not assigned to any brawler automatically.
 
 ## Validation
 

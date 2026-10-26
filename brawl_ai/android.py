@@ -87,22 +87,47 @@ def setup():
     print(f"Android installed in {root}. Run: python -m brawl_ai emulator")
 
 
-def start():
+def start(gpu="software"):
     executable = cache_root() / "sdk/emulator/emulator"
     if not executable.exists():
         raise RuntimeError("Run 'python -m brawl_ai setup' first.")
     if not os.access("/dev/kvm", os.R_OK | os.W_OK):
         raise RuntimeError("KVM is unavailable. Enable Intel VT-x in firmware and give your user access to /dev/kvm, then retry outside a sandbox.")
-    run([executable, "-avd", NAME, "-memory", "2048", "-cores", "2", "-no-snapshot", "-no-boot-anim"])
+    adb = cache_root() / "sdk/platform-tools/adb"
+    run([adb, "start-server"], capture_output=True, timeout=15)
+    run([executable, "-avd", NAME, "-memory", "2048", "-cores", "2",
+         "-accel", "on", "-gpu", gpu, "-skin", "720x1280",
+         "-no-snapshot", "-no-boot-anim"])
+
+
+def adb_path():
+    local = cache_root() / "sdk/platform-tools/adb"
+    adb = str(local) if local.exists() else shutil.which("adb")
+    if not adb:
+        raise RuntimeError("ADB not found. Install Android platform-tools or run setup first.")
+    return adb
+
+
+def usb_serial():
+    """Select exactly one authorized physical USB device, never an emulator."""
+    try:
+        result = run([adb_path(), "-d", "get-serialno"], capture_output=True, timeout=15)
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or b"").decode(errors="replace").strip()
+        raise RuntimeError("USB device unavailable. Connect one Android phone with a data cable, "
+                           "enable USB debugging, unlock it and accept this computer's authorization. "
+                           "If Linux reports insufficient permissions, check Android USB udev rules. "
+                           + detail) from error
+    serial = result.stdout.decode().strip()
+    if not serial or serial == "unknown":
+        raise RuntimeError("No authorized USB phone found. Check USB debugging and the cable.")
+    return serial
 
 
 class Device:
     def __init__(self, serial):
         self.serial = serial
-        local = cache_root() / "sdk/platform-tools/adb"
-        self.adb = str(local) if local.exists() else shutil.which("adb")
-        if not self.adb:
-            raise RuntimeError("ADB not found. Run setup first.")
+        self.adb = adb_path()
 
     def command(self, *args):
         return run([self.adb, "-s", self.serial, *args], capture_output=True, timeout=15).stdout
@@ -118,11 +143,14 @@ class Device:
             return round(x * width), round(y * height)
         if action == "idle":
             return
-        if action == "attack":
-            x, y = point("attack")
+        if action in ("attack", "super", "gadget", "hypercharge"):
+            x, y = point(action)
             self.command("shell", "input", "tap", str(x), str(y))
         else:
-            x, y = point("move")
-            dx, dy = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}[action]
-            radius = round(min(size) * controls["radius"])
-            self.command("shell", "input", "swipe", str(x), str(y), str(x + dx * radius), str(y + dy * radius), "180")
+            control, direction = action.split("_", 1) if "_" in action else ("move", action)
+            x, y = point(control)
+            dx, dy = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}[direction]
+            radius = round(min(size) * controls.get(control + "_radius", controls["radius"]))
+            end_x = max(0, min(width - 1, x + dx * radius))
+            end_y = max(0, min(height - 1, y + dy * radius))
+            self.command("shell", "input", "swipe", str(x), str(y), str(end_x), str(end_y), "180")

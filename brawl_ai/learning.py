@@ -3,7 +3,21 @@ import json
 import random
 from pathlib import Path
 
-ACTIONS = ("idle", "up", "down", "left", "right", "attack")
+ACTIONS = ("idle", "up", "down", "left", "right", "attack", "super", "gadget", "hypercharge",
+           "super_up", "super_down", "super_left", "super_right",
+           "gadget_up", "gadget_down", "gadget_left", "gadget_right")
+
+
+def available_actions(controls, calibrated):
+    actions = list(range(6))
+    for control in ("super", "gadget", "hypercharge"):
+        if control not in calibrated:
+            continue
+        if control != "hypercharge" and controls.get(control + "_mode", "tap") == "drag":
+            actions.extend(i for i, name in enumerate(ACTIONS) if name.startswith(control + "_"))
+        else:
+            actions.append(ACTIONS.index(control))
+    return actions
 
 
 def state_key(image):
@@ -22,19 +36,24 @@ class Learner:
             self.table, self.steps = data["table"], data["steps"]
 
     def values(self, state):
-        return self.table.setdefault(state, [0.0] * len(ACTIONS))
+        values = self.table.setdefault(state, [0.0] * len(ACTIONS))
+        # Preserve the original six action indices when opening older policies.
+        values.extend([0.0] * (len(ACTIONS) - len(values)))
+        return values
 
-    def choose(self, state):
+    def choose(self, state, available=None):
+        available = list(range(len(ACTIONS))) if available is None else available
         epsilon = max(0.15, 1.0 - self.steps / 10000)
         if random.random() < epsilon:
-            return random.randrange(len(ACTIONS))
+            return random.choice(available)
         values = self.values(state)
-        best = max(values)
-        return random.choice([i for i, value in enumerate(values) if value == best])
+        best = max(values[i] for i in available)
+        return random.choice([i for i in available if values[i] == best])
 
-    def update(self, state, action, reward, next_state, terminal=False):
+    def update(self, state, action, reward, next_state, terminal=False, available=None):
         values = self.values(state)
-        target = reward + (0 if terminal else 0.9 * max(self.values(next_state)))
+        available = range(len(ACTIONS)) if available is None else available
+        target = reward + (0 if terminal else 0.9 * max(self.values(next_state)[i] for i in available))
         values[action] += 0.15 * (target - values[action])
         self.steps += 1
 
