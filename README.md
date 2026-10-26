@@ -139,6 +139,16 @@ python -m brawl_ai teach --brawler "Shelly" --mode "Solo Showdown"
 
 Closing the console commits the last completed transition and saves the policy. ADB operations run in a background thread so the interface can respond. Device commands time out after 15 seconds. Capture errors stop continuous stepping.
 
+### Automatic preview capture
+
+Enable **Auto capture** to refresh screenshots and enemy/map recognition without sending game actions. Set **Interval / minimum (seconds)** from `0.2` to `60` and click **Apply capture settings**. With **Adaptive** unchecked, this is the target time between capture starts. If processing takes longer, captures wait for completion and leave at least 0.1 seconds before the next one; frames never build up in a queue.
+
+With **Adaptive** checked, the interval is a minimum. The scheduler targets the greater of that minimum and twice the smoothed capture/processing time, leaving room for interaction instead of continuously running detection. For example, a 1-second minimum and 2-second processing time give an initial 4-second target interval. The separate capture status shows the target and latest processing duration. This is a timing heuristic, not CPU/GPU utilization measurement or a proven optimal frame rate. Start with the default 2 seconds and Adaptive enabled.
+
+Preview capture waits during device operations, calibration, labeling, box refinements and identity review dialogs. During continuous AI training it waits because each AI step already captures its result. It resumes after the blocking activity ends; **Pause** stops AI stepping but does not disable preview capture. Uncheck **Auto capture** to stop preview updates. Errors, profile switches, episode end and closing the console disable it. An already running capture can still finish after disabling. Interval and adaptive preferences persist in `training/capture-settings.json`, but automatic capture starts off each time the console opens.
+
+Preview refreshes do not perform AI actions, change pending transition states, assign rewards, train on predictions, or save every frame to disk. If you refresh while a transition awaits feedback, the reward still applies to the last completed AI action and its original captured result. Disable auto capture while assessing that exact result if you want it to stay visible. Labeled examples continue to save normally. Automated tests cover scheduling, adaptation, cancellation, interaction blocking and reward/transition preservation; live automatic capture has not been verified on a phone.
+
 ### Super, gadget, hypercharge and reward sizes
 
 Pause, capture a frame, then use **Calibrate super**, **Calibrate gadget** or **Calibrate hypercharge** and click the corresponding button center in the preview. You can teach these controls gradually: an optional ability is excluded from AI choices until calibrated. Set **Super input** and **Gadget input** to `tap` for button activation/auto-aim, or `drag` for directional aiming. Drag mode exposes four separate actions (up, down, left, right), using a swipe of 10% of the smaller screen dimension. Hypercharge uses a tap. This does not detect charge, remaining gadget uses or ability availability in the game; feedback must teach when an action is useful. Live ability behavior has not yet been verified on a physical device.
@@ -180,6 +190,7 @@ Default layout:
   android/                  # Android user configuration
   training/
     controls.json           # Normalized control coordinates and calibration status
+    capture-settings.json   # Preview interval and adaptive timing preference
     maps/<mode-key>/
       recognizer.json       # Confirmed map names and scene descriptors
     profiles/

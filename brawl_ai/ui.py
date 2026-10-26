@@ -14,6 +14,7 @@ from .profiles import BRAWLERS, Profile, choices
 from .curriculum import recommend
 from .detection import EnemyDetector, enemy_state
 from .maps import MapRecognizer, map_state
+from .capture import CaptureLoop, capture_interval
 
 
 class Console:
@@ -36,6 +37,7 @@ class Console:
         self.busy = self.running = False
         self.image = self.pending = self.mode = None
         self.box_edit = None
+        self.reviewing = False
         self.reward = 0.0
         self.auto_job = None
         selector = tk.Frame(self.root)
@@ -75,7 +77,9 @@ class Console:
         tk.Button(suggestions, text="Refresh recommendation", command=self.refresh_recommendation).pack(side="left")
         tk.Button(suggestions, text="Load recommended profile", command=self.load_recommendation).pack(side="left")
         self.refresh_recommendation()
-        self.canvas = tk.Canvas(self.root, width=960, height=540, bg="#222222")
+        self.preview_limit = (min(960, max(320, self.root.winfo_screenwidth() - 60)),
+                              min(540, max(180, self.root.winfo_screenheight() - 560)))
+        self.canvas = tk.Canvas(self.root, width=self.preview_limit[0], height=self.preview_limit[1], bg="#222222")
         self.canvas.pack()
         self.canvas.bind("<ButtonPress-1>", self.press)
         self.canvas.bind("<B1-Motion>", self.drag)
@@ -89,6 +93,29 @@ class Console:
                                ("Calibrate hypercharge", lambda: self.set_mode("hypercharge")),
                                ("Label object", lambda: self.set_mode("label"))]:
             tk.Button(bar, text=label, command=command).pack(side="left")
+        capture_bar = tk.Frame(self.root)
+        capture_bar.pack()
+        settings_path = self.training_root / "capture-settings.json"
+        try:
+            settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+            seconds = capture_interval(settings.get("seconds", 2))
+            adaptive = bool(settings.get("adaptive", True))
+        except (OSError, ValueError, TypeError, AttributeError):
+            seconds, adaptive = 2.0, True
+        self.auto_capture_enabled = tk.BooleanVar(value=False)
+        self.capture_seconds = tk.StringVar(value=str(seconds))
+        self.capture_adaptive = tk.BooleanVar(value=adaptive)
+        tk.Checkbutton(capture_bar, text="Auto capture", variable=self.auto_capture_enabled,
+                       command=self.configure_capture).pack(side="left")
+        tk.Label(capture_bar, text="Interval / minimum (seconds):").pack(side="left")
+        tk.Spinbox(capture_bar, from_=0.2, to=60, increment=0.2, width=6,
+                   textvariable=self.capture_seconds).pack(side="left")
+        tk.Checkbutton(capture_bar, text="Adaptive", variable=self.capture_adaptive,
+                       command=self.configure_capture).pack(side="left")
+        tk.Button(capture_bar, text="Apply capture settings", command=self.configure_capture).pack(side="left")
+        self.capture_status = tk.StringVar(value="Auto capture: off")
+        tk.Label(self.root, textvariable=self.capture_status).pack()
+        self.capture_loop = CaptureLoop(self.root, self.capture_preview, self.capture_blocked, self.capture_status.set)
         options = tk.Frame(self.root)
         options.pack()
         self.control_modes = {}
@@ -129,6 +156,43 @@ class Console:
 
     def update_profile_status(self):
         self.profile_status.set(f"Active: {self.profile.brawler} / {self.profile.mode} | Learned transitions: {self.agent.steps}")
+
+    def capture_blocked(self):
+        if self.busy:
+            return "device operation or detection in progress"
+        if self.running:
+            return "AI training supplies its own captures"
+        if self.mode or self.reviewing:
+            return "finish or cancel the current selection/review"
+        return None
+
+    def capture_preview(self, complete):
+        def received(result):
+            self.show(result)
+            complete()
+        self.work(self.capture_frame, received)
+
+    def configure_capture(self):
+        try:
+            seconds = capture_interval(self.capture_seconds.get())
+            adaptive = self.capture_adaptive.get()
+            path = self.training_root / "capture-settings.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"seconds": seconds, "adaptive": adaptive}, indent=2))
+            temporary.replace(path)
+            if self.auto_capture_enabled.get():
+                self.capture_loop.start(seconds, adaptive)
+            else:
+                self.stop_capture()
+        except (OSError, ValueError, TypeError) as error:
+            self.stop_capture()
+            self.status.set(str(error))
+
+    def stop_capture(self):
+        self.capture_loop.stop()
+        self.auto_capture_enabled.set(False)
+        self.capture_status.set("Auto capture: off")
 
     def update_map_status(self):
         text = f"Active map: {self.active_map or 'unassigned'}"
@@ -239,6 +303,7 @@ class Console:
         if profile.folder == self.profile.folder:
             self.status.set("This profile is already active.")
             return
+        self.stop_capture()
         # Commit feedback to the old model before changing the active profile.
         self.finish(terminal=True)
         self.agent.save()
@@ -281,6 +346,7 @@ class Console:
             self.busy = False
             if error:
                 self.pause()
+                self.stop_capture()
                 self.status.set(f"Operation failed: {error}. Retry Capture after checking the device.")
             else:
                 callback(result)
@@ -294,6 +360,7 @@ class Console:
 
     def callback_error(self, error_type, error, trace):
         self.pause()
+        self.stop_capture()
         self.cancel_box_edit()
         traceback.print_exception(error_type, error, trace)
         self.status.set(f"Console error: {error}. Details are in the terminal; try Capture again.")
@@ -308,7 +375,7 @@ class Console:
         self.map_prediction = self.map_recognizer.predict(image)
         self.update_map_status()
         preview = image.copy()
-        preview.thumbnail((960, 540))
+        preview.thumbnail(self.preview_limit)
         self.preview_size = preview.size
         self.photo = ImageTk.PhotoImage(preview)
         self.canvas.delete("all")
@@ -434,6 +501,13 @@ class Console:
         self.cancel_box_edit(announce=False)
 
     def ask_identity(self, suggestion="Unknown", review=False):
+        self.reviewing = True
+        try:
+            return self.identity_dialog(suggestion, review)
+        finally:
+            self.reviewing = False
+
+    def identity_dialog(self, suggestion="Unknown", review=False):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm character identity")
         dialog.transient(self.root)
@@ -636,6 +710,7 @@ class Console:
 
     def terminal(self):
         self.pause()
+        self.stop_capture()
         if self.busy:
             self.status.set("Wait for the current action, then mark episode end again.")
             return
@@ -649,6 +724,7 @@ class Console:
 
     def close(self):
         self.pause()
+        self.stop_capture()
         if self.busy:
             messagebox.showinfo("Action in progress", "Wait for the current action before closing.")
             return

@@ -38,6 +38,10 @@ def console_fixture(folder):
     console.log = Mock()
     console.work = Mock()
     console.show = Mock()
+    console.capture_loop = Mock()
+    console.auto_capture_enabled = Mock()
+    console.capture_status = Mock()
+    console.reviewing = False
     return console
 
 
