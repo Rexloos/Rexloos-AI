@@ -522,7 +522,10 @@ class Console:
         def received(result):
             self.show_preview(result, revision)
             complete()
-        self.work(self.capture_frame, received, kind="preview")
+        self.work(self.capture_preview_frame, received, kind="preview")
+
+    def capture_preview_frame(self):
+        return self.capture_frame(preview=True)
 
     def show_preview(self, result, revision):
         if revision == self.preview_revision and not self.reviewing and not self.mode:
@@ -556,6 +559,9 @@ class Console:
 
     def stop_capture(self):
         self.capture_loop.stop()
+        device = getattr(self, "device", None)
+        if device is not None:
+            device.stop_preview()
         self.auto_capture_enabled.set(False)
         self.capture_status.set("Auto capture: off")
 
@@ -767,7 +773,7 @@ class Console:
                 if revision == self.preview_revision:
                     self.refresh_detection(image)
             # A failed render/callback must not permanently stop the worker queue.
-            self.root.after(100, self.poll)
+            self.root.after(25, self.poll)
 
     def callback_error(self, error_type, error, trace):
         self.pause()
@@ -778,9 +784,9 @@ class Console:
             self.activity.add("error", "".join(traceback.format_exception(error_type, error, trace)))
         self.status.set(f"Console error: {error}. Details are in the terminal; try Capture again.")
 
-    def capture_frame(self):
+    def capture_frame(self, preview=False):
         started = time.monotonic()
-        image = self.device.screenshot()
+        image = self.device.preview_screenshot() if preview else self.device.screenshot()
         captured = time.monotonic()
         detections = self.detect_scene(image)
         recognized = time.monotonic()
@@ -793,6 +799,8 @@ class Console:
                           f" | decode {metrics['decode_seconds']:.3f}s | next {metrics['next_backend']}")
                 if metrics.get("fallback"):
                     activity.add("capture_fallback", f"Raw capture unavailable; using PNG: {metrics['fallback']}")
+                if metrics.get("preview_fallback"):
+                    activity.add("preview_fallback", f"Video preview unavailable; using screenshots: {metrics['preview_fallback']}")
             activity.add("capture", f"Screenshot {captured-started:.3f}s | recognition {recognized-captured:.3f}s"
                          f" | total {recognized-started:.3f}s{detail}", interval=2)
         return image, detections

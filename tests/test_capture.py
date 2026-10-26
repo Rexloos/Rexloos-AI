@@ -9,6 +9,17 @@ from brawl_ai.ui import Console
 
 
 class CaptureTests(unittest.TestCase):
+    def test_only_automatic_preview_uses_video_frames(self):
+        console = Console.__new__(Console)
+        console.device = Mock()
+        console.detect_scene = Mock(return_value=[])
+        console.capture_preview_frame()
+        console.device.preview_screenshot.assert_called_once()
+        console.device.screenshot.assert_not_called()
+        console.capture_frame()
+        console.device.screenshot.assert_called_once()
+        self.assertEqual(console.device.preview_screenshot.call_count, 1)
+
     def loop(self):
         root = Mock()
         root.after.return_value = "timer"
@@ -34,8 +45,8 @@ class CaptureTests(unittest.TestCase):
         loop.tick()
         self.now = 3
         loop.capture.call_args.args[0]()
-        self.assertEqual(loop.root.after.call_args.args[0], 3000)
-        self.assertIn("target 6.00s", loop.report.call_args.args[0])
+        self.assertEqual(loop.root.after.call_args.args[0], 750)
+        self.assertIn("target 3.75s", loop.report.call_args.args[0])
 
     def test_stop_or_reconfigure_does_not_resurrect_old_completion(self):
         loop = self.loop()
@@ -81,7 +92,7 @@ class CaptureTests(unittest.TestCase):
         complete = Mock()
         console.capture_preview(complete)
         operation, callback = console.work.call_args.args
-        self.assertEqual(operation, console.capture_frame)
+        self.assertEqual(operation, console.capture_preview_frame)
         callback(("frame", []))
         console.show.assert_called_once_with(("frame", []))
         complete.assert_called_once()

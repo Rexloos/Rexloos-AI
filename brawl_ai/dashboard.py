@@ -201,9 +201,9 @@ def build_dashboard(c):
     try:
         path = c.training_root/"capture-settings.json"
         settings = json.loads(path.read_text()) if path.exists() else {}
-        seconds, adaptive = capture_interval(settings.get("seconds", 2)), bool(settings.get("adaptive", True))
+        seconds, adaptive = capture_interval(settings.get("seconds", .5)), bool(settings.get("adaptive", True))
     except (OSError, ValueError, TypeError, AttributeError):
-        seconds, adaptive = 2., True
+        seconds, adaptive = .5, True
     c.auto_capture_enabled = tk.BooleanVar(value=False)
     c.capture_seconds = tk.StringVar(value=str(seconds))
     c.capture_adaptive = tk.BooleanVar(value=adaptive)

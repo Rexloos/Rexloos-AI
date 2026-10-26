@@ -157,12 +157,19 @@ class Device:
         self.capture_metrics = {}
         self._png_capture_seconds = None
         self._capture_compared = self.capture_mode != "auto"
+        self.preview_mode = os.environ.get("BRAWL_AI_PREVIEW", "stream")
+        if self.preview_mode not in ("stream", "snapshot"):
+            raise ValueError("BRAWL_AI_PREVIEW must be stream or snapshot.")
+        self._preview_stream = None
+        self._preview_failed = False
+        self._screen_size = None
 
     def command(self, *args):
         return run([self.adb, "-s", self.serial, *args], capture_output=True, timeout=15).stdout
 
     def screenshot(self):
         from PIL import Image
+        self.stop_preview()
         # Probe on the next request, never take two screenshots for one result.
         backend = self.capture_backend
         if not self._capture_compared and self._png_capture_seconds is not None:
@@ -198,7 +205,40 @@ class Device:
                                 "transfer_seconds": transferred-started,
                                 "decode_seconds": finished-transferred,
                                 "total_seconds": elapsed, "bytes": len(data), "fallback": fallback}
+        self._screen_size = image.size
         return image
+
+    def stop_preview(self):
+        stream = self._preview_stream
+        self._preview_stream = None
+        if stream is not None:
+            stream.close()
+
+    def preview_screenshot(self):
+        from .stream import PreviewStream
+        if self.preview_mode == "snapshot" or self._preview_failed:
+            return self.screenshot()
+        if self._screen_size is None:
+            image = self.screenshot()
+            self._preview_stream = PreviewStream(self.adb, self.serial, image.size, environment())
+            return image
+        if self._preview_stream is not None and time.monotonic()-self._preview_stream.started > 110:
+            self.stop_preview()
+        if self._preview_stream is None:
+            self._preview_stream = PreviewStream(self.adb, self.serial, self._screen_size, environment())
+        started = time.monotonic()
+        try:
+            image = self._preview_stream.frame()
+            elapsed = time.monotonic()-started
+            self.capture_metrics = {"backend": "h264-preview", "next_backend": "h264-preview",
+                                    "transfer_seconds": elapsed, "decode_seconds": 0,
+                                    "total_seconds": elapsed, "bytes": 0, "fallback": None}
+            return image
+        except (RuntimeError, TimeoutError, OSError) as error:
+            self._preview_failed = True
+            image = self.screenshot()
+            self.capture_metrics["preview_fallback"] = str(error)
+            return image
 
     def action(self, action, size, controls):
         width, height = size

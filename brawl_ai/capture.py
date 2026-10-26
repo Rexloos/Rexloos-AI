@@ -20,7 +20,7 @@ class CaptureLoop:
         self.enabled = False
         self.job = None
         self.generation = 0
-        self.seconds = 2.0
+        self.seconds = .5
         self.adaptive = True
         self.average = None
 
@@ -57,7 +57,7 @@ class CaptureLoop:
                 return
             elapsed = max(0, self.clock() - started)
             self.average = elapsed if self.average is None else .7*self.average + .3*elapsed
-            target = max(self.seconds, 2*self.average) if self.adaptive else self.seconds
+            target = max(self.seconds, 1.25*self.average) if self.adaptive else self.seconds
             # Measure start-to-start cadence; always leave time for user interaction.
             delay = max(.1, target - elapsed)
             self.report(f"Auto capture: {'adaptive' if self.adaptive else 'fixed'} | "
