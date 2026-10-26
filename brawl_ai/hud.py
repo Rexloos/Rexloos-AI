@@ -11,6 +11,8 @@ NAMES = {"move": "Movement joystick", "attack": "Attack", "super": "Super", "gad
 
 
 def hud_label(item):
+    if item.get("kind") == "player":
+        return f"Player (profile: {item['identity']})" + ("?" if item.get("score", 0) < .9 else "")
     if item.get("kind") != "control":
         return f"{item.get('identity', 'Unknown')}? {item.get('identity_score', 0):.2f}"
     state = item.get("state", "unknown")

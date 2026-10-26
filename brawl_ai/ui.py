@@ -21,6 +21,7 @@ from .recordings import (MatchRecording, RecordingAnalysis, video_tools, load_ge
                          video_info, action_requests, decode_frame)
 from .replay import TASKS, ReplayPlayer
 from .hud import CONTROLS, STATES, HudDetector, hud_label
+from .player import PlayerDetector, merge_player
 
 
 class Console:
@@ -34,6 +35,7 @@ class Console:
         self.agent = Learner(self.folder / "policy.json")
         self.detector = EnemyDetector(self.folder)
         self.hud_detector = HudDetector(self.folder)
+        self.self_detector = PlayerDetector(self.folder, self.profile.brawler)
         self.detections = []
         self.map_recognizer = MapRecognizer(self.training_root, self.profile.mode)
         self.active_map = self.map_prediction = None
@@ -185,6 +187,7 @@ class Console:
         detection_bar = tk.Frame(self.root)
         detection_bar.pack()
         tk.Button(detection_bar, text="Label enemy", command=lambda: self.set_mode("enemy")).pack(side="left")
+        tk.Button(detection_bar, text="Label player", command=lambda: self.set_mode("player")).pack(side="left")
         tk.Button(detection_bar, text="Label false detection", command=lambda: self.set_mode("not_enemy")).pack(side="left")
         tk.Button(detection_bar, text="Cancel selection (Esc)", command=self.cancel_box_edit).pack(side="left")
         self.detection_status = tk.StringVar(value="Enemy detector: label examples to begin.")
@@ -346,7 +349,7 @@ class Console:
             path, _, _ = self.selected_game()
             candidates = sorted((path/"analyses").glob("*/replay.json"))
             if not candidates:
-                raise ValueError("No analyzed replay is available for this game yet.")
+                raise ValueError("No replay is available. Older replays may have been removed by automatic storage cleanup; learned progress is preserved.")
             self.open_replay(candidates[-1].with_suffix(".mp4"))
         except (OSError, ValueError) as error:
             self.status.set(str(error))
@@ -410,11 +413,14 @@ class Console:
         active_map = self.active_map
         detector = self.detector
         hud = getattr(self, "hud_detector", None)
+        own = getattr(self, "self_detector", None)
         control_snapshot, calibration = dict(self.controls), set(self.calibrated)
         def state_builder(image):
             detections = detector.detect(image)
             if hud is not None:
                 detections += hud.detect(image, control_snapshot, calibration)
+            if own is not None:
+                detections = merge_player(detections, own.detect(image))
             return map_state(enemy_state(image, detections, detector.ready), active_map), detections
         if recording:
             self.reset_player_tasks()
@@ -497,10 +503,13 @@ class Console:
         self.finish(terminal=True)
         detector = self.detector
         hud = getattr(self, "hud_detector", None)
+        own = getattr(self, "self_detector", None)
         def state_builder(image):
             detections = detector.detect(image)
             if hud is not None:
                 detections += hud.detect(image, metadata["controls"], metadata["calibrated"])
+            if own is not None:
+                detections = merge_player(detections, own.detect(image))
             return map_state(enemy_state(image, detections, detector.ready), metadata.get("map")), detections
         self.reset_player_tasks(saved=True)
         self.player_session = RecordingAnalysis(path, style, state_builder, offset, recognition_ready=detector.ready)
@@ -747,6 +756,7 @@ class Console:
             agent = Learner(folder / "policy.json")
             detector = EnemyDetector(folder)
             hud_detector = HudDetector(folder)
+            self_detector = PlayerDetector(folder, profile.brawler)
             map_recognizer = MapRecognizer(self.training_root, profile.mode)
         except (OSError, ValueError) as error:
             self.status.set(str(error))
@@ -768,6 +778,7 @@ class Console:
         self.update_map_status()
         self.detector, self.detections = detector, []
         self.hud_detector = hud_detector
+        self.self_detector = self_detector
         self.detection_status.set("Enemy detector: capture a frame for this profile.")
         self.mode = self.image = None
         self.box_edit = None
@@ -837,6 +848,9 @@ class Console:
         hud = getattr(self, "hud_detector", None)
         if hud is not None:
             detections += hud.detect(image, dict(self.controls), set(self.calibrated))
+        own = getattr(self, "self_detector", None)
+        if own is not None:
+            detections = merge_player(detections, own.detect(image))
         return detections
 
     def use_detected_controls(self, automatic=False):
@@ -878,12 +892,13 @@ class Console:
         w, h = self.preview_size
         for item in self.detections:
             x0, y0, x1, y1 = item["box"]
-            color = "cyan" if item.get("kind") == "control" else "red"
+            color = "cyan" if item.get("kind") == "control" else "lime" if item.get("kind") == "player" else "red"
             self.canvas.create_rectangle(x0*w, y0*h, x1*w, y1*h, outline=color, width=2)
             self.canvas.create_text(min(x0*w, w - 200), max(12, y0*h), anchor="sw", fill=color, text=hud_label(item))
         controls = [item for item in self.detections if item.get("kind") == "control"]
-        entities = len(self.detections)-len(controls)
-        self.detection_status.set(f"Entity matches: {entities} | Control boxes: {len(controls)} | Click a box to confirm/correct.")
+        own = [item for item in self.detections if item.get("kind") == "player"]
+        entities = len(self.detections)-len(controls)-len(own)
+        self.detection_status.set(f"Entity matches: {entities} | Player: {'found' if own else 'unknown'} | Controls: {len(controls)} | Click to review.")
 
     def capture(self):
         if self.player_guard():
@@ -919,7 +934,9 @@ class Console:
         self.mode = mode
         self.canvas.configure(cursor="crosshair")
         self.status.set("Labeling active: hold the left mouse button, draw a tight box, then release to choose its identity/state. Esc cancels."
-                        if mode in ("label", "enemy", "not_enemy", "hud") else "Click the center of the on-screen control.")
+                        if mode in ("label", "enemy", "not_enemy", "hud", "player") else "Click the center of the on-screen control.")
+        if mode == "player":
+            self.status.set("Draw a tight box around your controlled character. The active profile supplies its brawler name. Esc cancels.")
 
     def press(self, event):
         if self.player_guard():
@@ -937,9 +954,11 @@ class Console:
                     return
                 # Freeze the displayed frame immediately; late preview results are stale.
                 self.preview_revision += 1
-                item = max(matches, key=lambda item: (item.get("kind") == "control", item["score"]))
+                item = max(matches, key=lambda item: ((2 if item.get("kind") == "control" else 1 if item.get("kind") == "player" else 0), item["score"]))
                 if item.get("kind") == "control":
                     self.review_control(item)
+                elif item.get("kind") == "player":
+                    self.review_player(item)
                 else:
                     self.review_detection(item)
             return
@@ -949,7 +968,7 @@ class Console:
         if not (0 <= event.x < w and 0 <= event.y < h):
             return
         self.origin = (event.x, event.y)
-        if self.mode not in ("label", "enemy", "not_enemy", "refine", "hud"):
+        if self.mode not in ("label", "enemy", "not_enemy", "refine", "hud", "player"):
             self.finish(terminal=True)
             self.controls[self.mode] = [event.x / w, event.y / h]
             self.calibrated.add(self.mode)
@@ -964,17 +983,21 @@ class Console:
             self.box = self.canvas.create_rectangle(event.x, event.y, event.x, event.y, outline="lime", width=2)
 
     def drag(self, event):
-        if self.mode in ("label", "enemy", "not_enemy", "refine", "hud") and hasattr(self, "box"):
+        if self.mode in ("label", "enemy", "not_enemy", "refine", "hud", "player") and hasattr(self, "box"):
             self.canvas.coords(self.box, *self.origin, event.x, event.y)
 
     def release(self, event):
-        if (self.busy and self.work_kind != "preview") or self.mode not in ("label", "enemy", "not_enemy", "refine", "hud") or not hasattr(self, "box"):
+        if (self.busy and self.work_kind != "preview") or self.mode not in ("label", "enemy", "not_enemy", "refine", "hud", "player") or not hasattr(self, "box"):
             return
         w, h = self.preview_size
         x0, x1 = sorted((self.origin[0], max(0, min(event.x, w))))
         y0, y1 = sorted((self.origin[1], max(0, min(event.y, h))))
         if x1 - x0 < 3 or y1 - y0 < 3:
             self.status.set("Box is too small. Draw it again or cancel the box edit.")
+            return
+        if self.mode == "player":
+            self.save_player_example([x0/w, y0/h, x1/w, y1/h])
+            self.cancel_box_edit(announce=False)
             return
         if self.mode == "hud":
             item = self.hud_box_edit or {"control": "move", "state": "unknown"}
@@ -1021,6 +1044,50 @@ class Console:
         self.reviewing = True
         try:
             return self.identity_dialog(suggestion, review)
+        finally:
+            self.reviewing = False
+
+    def save_player_example(self, box, accepted=True):
+        self.finish(terminal=True)
+        try:
+            bound = self.self_detector.learn(self.image, box, accepted)
+            name = f"player-frame-{time.time_ns()}.png"
+            self.image.save(self.folder/name)
+            self.log("player-annotations.jsonl", {"image": name, "box": box, "accepted": accepted,
+                                                 "role": "self", "identity": self.profile.brawler, "marker_geometry": bound})
+            self.refresh_detection(self.image)
+            self.status.set("Player example saved." if bound or not accepted else
+                            "Player example saved for this frame. Automatic recognition needs visible self markers.")
+        except (OSError, ValueError) as error:
+            self.status.set(str(error))
+
+    def review_player(self, item):
+        self.pause()
+        self.reviewing = True
+        try:
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Review my player")
+            dialog.transient(self.root)
+            tk.Label(dialog, text=f"Controlled player (profile: {self.profile.brawler})\nConfirm the role and box, or correct this proposal.", wraplength=420).pack(padx=16, pady=10)
+            result = []
+            def accept(action):
+                result.append(action)
+                dialog.destroy()
+            for text, action in (("Confirm my player", "confirm"), ("Redraw player box", "redraw"), ("Not my player", "reject")):
+                tk.Button(dialog, text=text, command=lambda action=action: accept(action)).pack(fill="x", padx=16)
+            tk.Button(dialog, text="Cancel", command=dialog.destroy).pack(pady=8)
+            dialog.geometry(f"+{self.root.winfo_rootx()+40}+{self.root.winfo_rooty()+40}")
+            dialog.wait_visibility()
+            dialog.grab_set()
+            self.root.wait_window(dialog)
+            if not result:
+                return
+            if result[0] == "redraw":
+                self.mode = "player"
+                self.canvas.configure(cursor="crosshair")
+                self.status.set("Draw a tighter box around your controlled character. Esc cancels.")
+            else:
+                self.save_player_example(item["box"], result[0] == "confirm")
         finally:
             self.reviewing = False
 

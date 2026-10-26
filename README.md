@@ -138,9 +138,19 @@ python -m brawl_ai teach --brawler "Shelly" --mode "Solo Showdown"
 4. Click **Reward +1** or **Penalty -1** to evaluate the displayed transition. Feedback applies to the most recently completed action, not a historical action. Multiple clicks add together. With no feedback the reward is zero.
 5. The next step commits that feedback and updates the policy. **Start** repeats steps with a 1.5-second feedback window after each captured result. **Pause** stops scheduling new actions; an in-flight action finishes.
 6. At a death or episode boundary, pause, wait for the in-flight action, assign the final reward and click **Episode ended**. Reset the game manually, then capture again. This prevents bootstrapping across episode boundaries.
-7. To explain what objects are, pause, capture, choose **Label object**, drag a rectangle and enter an English name such as `player`, `enemy`, `wall` or `health_bar`. The `enemy` and `not_enemy` labels train the appearance matcher immediately; other labels are saved for future recognition work. Dedicated enemy labeling buttons avoid typing these two labels.
+7. To explain what objects are, pause, capture, choose **Label object**, drag a rectangle and enter an English name such as `enemy`, `wall` or `health_bar`. The `enemy` and `not_enemy` labels train the appearance matcher immediately; other labels are saved for future recognition work. Use **Label player** for your controlled character and **Label enemy** for other entities.
 
 Closing the console commits the last completed transition and saves the policy. ADB operations run in a background thread so the interface can respond. Device commands time out after 15 seconds. Capture errors stop continuous stepping.
+
+### Recognize your controlled character
+
+Captures and analyzed replays automatically propose a lime **Player** box around your own character. Recognition starts without examples or pretrained weights: it combines a green health bar and its outline with a green name or foot ring. It does not assume that the player is at the center. The brawler name comes from the selected profile, not visual brawler identification or name OCR.
+
+Click the lime box to confirm it, redraw it, or reject it as **Not my player**. **Label player** lets you draw your own box when no proposal appears. Corrections teach body geometry relative to the health marker and save exact-frame confirmations and rejected appearances. Examples stay separate for each brawler/mode profile; existing `player`/`self` object annotations are imported when creating the detector.
+
+Your detected position enters the learning state, and overlapping entity proposals are removed so the same body is not counted as an enemy. Missing or ambiguous markers leave the player unknown; they do not imply death. Occlusion, very low health, crowded scenes and different marker colors can prevent recognition. This feature does not read numeric HP. Raw game recording remains free of detection work; recognition runs during capture and post-game analysis.
+
+Verification: automated tests cover ownership markers, ambiguity, partial health, corrections, persistence, profile separation, learning states and overlays. A lime box was also inspected on a saved real gameplay screenshot. Live gameplay and the interactive correction dialog have not been manually verified.
 
 ### Learn a player's playstyle from the USB phone
 
@@ -155,7 +165,15 @@ Video is encoded on the phone and saved continuously as `game.mkv` using [scrcpy
 
 **Advanced settings / saved games** is collapsed by default. It contains player selection/loading, the FPS limit, optional input preview, rotation override, timing adjustment, previously saved recordings and **Analyze selected saved game** for resuming a cancelled analysis later. Touch rotation is detected from Android's input display orientation when available, otherwise the saved/manual value is used. Disable automatic rotation and use the optional cyan touch-marker preview if that mapping is wrong. Input preview gap controls only this calibration preview, not recording cadence.
 
-Timing is estimated automatically from device/host input timestamps and the video recorder's start log. This is not guaranteed to be frame-exact. If results look misaligned, advanced **Preview recorded action** and **Video/input offset** let you inspect and adjust timing before manually analyzing an unlearned saved recording. Positive offsets select a later point in the video for the gesture. Previously applied recordings remain protected against double counting. Raw video remains available for inspection in a video player.
+Timing is estimated automatically from device/host input timestamps and the video recorder's start log. This is not guaranteed to be frame-exact. If results look misaligned, advanced **Preview recorded action** and **Video/input offset** let you inspect and adjust timing before manually analyzing an unlearned saved recording. Positive offsets select a later point in the video for the gesture. Previously applied recordings remain protected against double counting. Raw video remains available until learning is successfully saved; afterward use the annotated replay.
+
+### Automatic storage cleanup
+
+Cleanup runs before a new phone recording and after successful post-game learning, for the current player/brawler/mode combination. After the learned model is saved and a completed, nonempty replay exists, it removes that game's original `game.mkv`, raw `input.jsonl` and `recorder.log`. The annotated replay replaces the raw video for watching the game. Failed or cancelled analysis removes its own partial export folder but preserves the original recording for retry. Interrupted exports left by a process crash are not automatically removed.
+
+Annotated replays have a 2 GiB budget per player/brawler/mode combination. Oldest replay videos and their playback metadata are removed first; the newest replay is always kept, even if it alone exceeds the budget. **Watch analyzed game** explains when a replay is no longer available. This is a replay budget, not a limit on total cache size: unapplied recordings, example images, annotations, action records, rewards, models and emulator files are preserved. Cleanup never resets learned progress. Existing eligible media are cleaned when the next recording starts or analysis succeeds; no bulk cleanup runs merely by opening the application.
+
+Automated tests cover retention order, unapplied and failed recordings, preservation of training references, symlink/path protections and successful/cancelled analysis. Disk cleanup has not been manually verified during live phone recording.
 
 Advanced **Imitation influence** controls how often the style supplies an action: for example `0.7` means a 70% chance, with the reward policy deciding otherwise. `0` uses only the reward policy. If no applicable style examples exist, the reward policy is used even at `1`. Continue assigning your own rewards during AI play as usual.
 
@@ -251,6 +269,9 @@ Default layout:
         transitions.jsonl   # Transitions, rewards and profile names
         annotations.jsonl   # Image filenames, labels, normalized xyxy boxes
         enemy-detector.json # Human-taught appearance templates and corrections
+        player-detector.json # Self-marker geometry and human appearance corrections
+        player-annotations.jsonl # Confirmed/rejected controlled-character boxes
+        player-frame-*.png  # Player teaching screenshots
         hud-detector.json   # Per-profile control/state appearance examples
         hud-annotations.jsonl # Confirmed/rejected HUD crops and availability states
         hud-frame-*.png     # HUD teaching screenshots
@@ -275,6 +296,7 @@ Default layout:
               finger-actions.json # Finger positions, interpreted actions and drag status
               character-proposals.json # Sampled brawler/NPC proposals
               control-proposals.json # Sampled control boxes and availability states
+              player-proposals.json # Sampled controlled-character boxes and evidence
               replay-media.log # FFmpeg rendering diagnostics
         frame-*.png         # Annotated screenshots for this combination
 ```

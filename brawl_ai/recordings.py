@@ -18,6 +18,7 @@ from .android import environment
 from .learning import ACTIONS, available_actions
 from .playstyle import Playstyle, TouchTracker, gesture_action, touch_devices
 from .replay import emit_task, render_replay
+from .storage import cleanup_recordings
 
 
 def write_json(path, value):
@@ -103,6 +104,10 @@ class MatchRecording:
         try:
             self.events.put(("progress", {"label": "Starting recording and live preview..."}))
             video_tools()
+            try:
+                cleanup_recordings(self.style)
+            except OSError:
+                pass
             devices = touch_devices(self.device.command("shell", "getevent", "-lp").decode(errors="replace"))
             if len(devices) != 1:
                 raise RuntimeError("Expected one readable multitouch touchscreen for video recording.")
@@ -321,6 +326,7 @@ class RecordingAnalysis:
         self.stop_event.set()
 
     def run(self):
+        stage = None
         try:
             self.events.put(("progress", {"label": "Analysis: reading video and recorded actions..."}))
             token = self.folder.name
@@ -382,6 +388,11 @@ class RecordingAnalysis:
             emit_task(self.events, "model", 1, 1)
             self.style = working
             self.success = True
+            try:
+                reclaimed = cleanup_recordings(working)
+                self.events.put(("status", f"Automatic cleanup freed {reclaimed/1048576:.1f} MB. Learning data and the newest replay were kept."))
+            except OSError:
+                self.events.put(("status", "Learning saved; automatic cleanup will retry next time."))
             self.events.put(("progress", {"label": f"Done: learned {len(requests)} actions", "current": 1, "total": 1}))
             self.events.put(("status", f"Analysis complete: learned {len(requests)} actions from the saved game."))
         except AnalysisCancelled:
@@ -390,4 +401,9 @@ class RecordingAnalysis:
             self.error = str(error)
             self.events.put(("error", str(error)))
         finally:
+            if stage is not None and not self.success:
+                try:
+                    shutil.rmtree(stage)
+                except OSError:
+                    pass
             self.events.put(("done", None))
