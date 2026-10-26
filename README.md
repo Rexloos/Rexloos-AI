@@ -10,9 +10,9 @@ Python downloads and launches the official Android Emulator (QEMU); this project
 - Launch a two-core, 2 GB RAM virtual device with a 720 × 1280 display and software graphics.
 - Capture the game through ADB and calibrate movement and attack controls visually.
 - Start a tabular Q policy from zero, explore actions, learn from positive and negative human feedback, and resume saved learning.
-- Annotate objects with English labels and normalized bounding boxes for a future detector.
+- Learn enemy appearance examples and false-detection corrections from human bounding boxes, then display matches and include their locations in policy states.
 
-This is a working development baseline, not a trained player. The current visual representation is a coarse 4 × 3 grayscale grid. It does not understand object names or learn a visual detector from annotations yet. It has no automatic health/damage reward extraction, match navigation, automatic resets, aiming model or simultaneous multi-touch controls. Movement uses short swipes and attack uses the game's attack button. Meaningful autonomous gameplay needs those later components; learning from scratch using only live screen interaction can take substantial time.
+This is a working development baseline, not a trained player. The visual representation combines a coarse 4 × 3 grayscale grid with enemy locations once the profile has enemy examples. Enemy recognition uses a small appearance template bank learned from human annotations, without pretrained weights. Other object labels are stored but do not train recognition. It has no automatic health/damage reward extraction, match navigation, automatic resets, targeting model or simultaneous multi-touch controls. Movement uses short swipes and attack uses the game's attack button. Meaningful autonomous gameplay needs those later components; learning from scratch using only live screen interaction can take substantial time.
 
 ## Requirements
 
@@ -109,7 +109,7 @@ Switching pauses training and commits any pending reward to the old profile as a
 
 The mode menu includes Solo Showdown, Duo Showdown, Trio Showdown, Brawl Ball, Gem Grab, Knockout, Heist, Hot Zone, Brawl Hockey, Basket Brawl, Wipeout, Knockout 5v5, Brawl Ball 5v5, Wipeout 5v5, Duels, Bounty and Brawl Arena, plus Training Ground for basic practice. Each variant has an independent policy.
 
-The learning algorithm and action set remain the same for all profiles. Recommendations provide suggested exercises for these modes, but rewards still come from your feedback. Mode selection does not add automatic objective detection, ball/puck interactions or new controls. Object labels remain saved annotations rather than a trained detector.
+The learning algorithm and action set remain the same for all profiles. Recommendations provide suggested exercises for these modes, but rewards still come from your feedback. Mode selection does not add automatic objective detection, ball/puck interactions or new controls. Enemy appearance examples are learned independently for each profile; other object labels remain saved annotations.
 
 To select a profile directly without the launcher:
 
@@ -123,7 +123,7 @@ python -m brawl_ai teach --brawler "Shelly" --mode "Solo Showdown"
 4. Click **Reward +1** or **Penalty -1** to evaluate the displayed transition. Feedback applies to the most recently completed action, not a historical action. Multiple clicks add together. With no feedback the reward is zero.
 5. The next step commits that feedback and updates the policy. **Start** repeats steps with a 1.5-second feedback window after each captured result. **Pause** stops scheduling new actions; an in-flight action finishes.
 6. At a death or episode boundary, pause, wait for the in-flight action, assign the final reward and click **Episode ended**. Reset the game manually, then capture again. This prevents bootstrapping across episode boundaries.
-7. To explain what objects are, pause, capture, choose **Label object**, drag a rectangle and enter an English name such as `player`, `enemy`, `wall` or `health_bar`. These annotations are saved for subsequent detector development; they do not currently alter the policy.
+7. To explain what objects are, pause, capture, choose **Label object**, drag a rectangle and enter an English name such as `player`, `enemy`, `wall` or `health_bar`. The `enemy` and `not_enemy` labels train the appearance matcher immediately; other labels are saved for future recognition work. Dedicated enemy labeling buttons avoid typing these two labels.
 
 Closing the console commits the last completed transition and saves the policy. ADB operations run in a background thread so the interface can respond. Device commands time out after 15 seconds. Capture errors stop continuous stepping.
 
@@ -134,6 +134,26 @@ Pause, capture a frame, then use **Calibrate super**, **Calibrate gadget** or **
 Calibration and super input mode are shared across profiles; recalibrate when the layout changes. Gadget input is saved separately for each brawler, shared across that brawler's game modes. On first opening a brawler without a saved gadget setting, the console asks whether the equipped gadget requires dragging. Answer Yes for drag or No for tap. Change this later using **Gadget input**, including when equipping a different gadget. Previously shared gadget settings are not assumed correct for a new brawler. Existing policies retain their learned values for the original actions; newly added actions start at zero.
 
 Enter a number under **Custom reward** and click **Add reward** after an AI step, for example `0.2` for a small improvement, `10` for completing an exercise, or `-5` for a mistake. Each click adds to the visible pending reward, including the existing +1/-1 buttons. **Clear pending reward** resets that sum before it is committed. Feedback applies to the most recently completed action, and is committed on the next step or episode end. Pause for more time to assess and reward an action. Larger magnitudes produce larger Q-value updates; recommendations still count positive/negative feedback rather than interpreting magnitude as mastery.
+
+### Teaching enemy recognition
+
+1. Pause and capture a frame containing an enemy.
+2. Click **Label enemy**, then drag a tight box around the enemy character, using consistent framing. Select its brawler name or **NPC** in the identity dialog and save. Include different appearances and animation poses across multiple captures.
+3. Detection refreshes on that frame and on subsequent captures and AI steps. Red boxes mark appearance matches. Beside each match, the console proposes the closest learned identity with a question mark and a similarity score. This score is not a calibrated probability. Without named examples it displays **Unknown**.
+4. Click a detected box to pause and review it. Use **Confirm suggestion**, or select/type the actual identity and click **Save correction / new example**. **Cancel** leaves training data unchanged. The list includes all 108 brawlers, verified against [Brawlify](https://brawlify.com/brawlers) on October 26, 2026, plus **NPC** and previously taught custom names. Listing a category does not supply pretrained appearance knowledge: names are learned only from your confirmed examples.
+5. If a box marks an ally, scenery or a control, use **Not an enemy** in the review dialog, or click **Label false detection** and draw that region. Draw around the incorrect region, not around a real enemy elsewhere. NPC is a character category, not a label for background or allies.
+
+Each detection is outlined by a rectangular quadrilateral. Click inside it to review both identity and box placement:
+
+- **Refine box**: redraw a more accurate rectangle around the character, then confirm/select its identity.
+- **Box too broad**: redraw a tight rectangle excluding the unwanted surrounding area, then confirm/select the character. This trains the corrected crop as an enemy and rejects the original box geometry; it does not label the real character as background.
+- **Box completely wrong**: reject the proposed box immediately without supplying a replacement or a character identity.
+
+While redrawing, the captured image stays fixed and AI stepping is blocked. **Cancel box edit** discards an unfinished correction. Tiny rectangles must be redrawn. Box feedback is saved immediately to the active profile's `box-feedback.jsonl` and detector file. The model keeps the latest 24 rejected box appearances/sizes and suppresses very similar proposals of approximately the same size. This is limited appearance-based feedback, not a trained general bounding-box regression model; it may still propose other incorrect boxes or miss a character in a new pose. Corrected examples are also saved as annotations. These controls have automated tests but have not been manually verified in the actual game.
+
+The detector starts empty and stores at most 12 examples per identity, 12 unnamed enemy examples and 12 negative examples per brawler/mode profile. Localization scans the latest 12 positive templates to bound CPU work; identity proposals compare each localized crop against all named examples. Older identities remain stored, but a sufficiently different appearance may need a fresh manually drawn box. A correction replaces contradictory supervision for an identical crop. Unconfirmed predictions never train the detector automatically. Previously saved `enemy`/`not_enemy` annotations are imported automatically when no detector file exists (the last 200 annotation records are considered); old unnamed examples remain usable without invented identities. Examples and the detector model are saved immediately in the local cache, independently of other profiles. Recognition runs in the background with ADB capture, on images reduced to at most 320 × 180, at three scales and a fixed similarity threshold of 0.94. It is appearance matching, not a neural network or a semantic understanding of enemies. Different skins, poses, backgrounds, scale changes and teammates with similar appearances may cause misses or false detections. No game accuracy claim has been established.
+
+After the first enemy example, policy state keys include occupied enemy cells in a 4 × 3 grid. Existing Q values remain stored, but these enriched states start with zero values until visited and rewarded. This supplies enemy location to learning; it does not automatically aim attacks at detected enemies. Changing detector examples commits the pending transition as an episode boundary before changing visual interpretation. Rewards train action selection; boxes train appearance matching. A small, flat-color crop is rejected as an uninformative example.
 
 ## Local storage and Git
 
@@ -152,6 +172,8 @@ Default layout:
         policy.json         # Q values and transition count for this combination
         transitions.jsonl   # Transitions, rewards and profile names
         annotations.jsonl   # Image filenames, labels, normalized xyxy boxes
+        enemy-detector.json # Human-taught appearance templates and corrections
+        box-feedback.jsonl  # Original/corrected rectangles and rejection reasons
         frame-*.png         # Annotated screenshots for this combination
 ```
 

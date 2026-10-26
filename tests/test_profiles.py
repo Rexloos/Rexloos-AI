@@ -53,7 +53,7 @@ class ProfileTests(unittest.TestCase):
             console.auto_job = None
             console.image = object()
             console.mode = "label"
-            for name in ("status", "profile_status", "recommendation_status", "canvas", "brawler_select", "mode_select"):
+            for name in ("status", "profile_status", "recommendation_status", "detection_status", "canvas", "brawler_select", "mode_select"):
                 setattr(console, name, Mock())
             console.brawler_name = Mock(get=Mock(return_value="Colt"))
             console.mode_name = Mock(get=Mock(return_value="Heist"))

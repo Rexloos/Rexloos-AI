@@ -8,9 +8,10 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from PIL import ImageTk
 from .android import Device, cache_root
-from .learning import ACTIONS, Learner, state_key, available_actions
-from .profiles import Profile, choices
+from .learning import ACTIONS, Learner, available_actions
+from .profiles import BRAWLERS, Profile, choices
 from .curriculum import recommend
+from .detection import EnemyDetector, enemy_state
 
 
 class Console:
@@ -22,12 +23,15 @@ class Console:
         self.root.title("Brawl AI — teaching console")
         self.folder = self.profile.prepare()
         self.agent = Learner(self.folder / "policy.json")
+        self.detector = EnemyDetector(self.folder)
+        self.detections = []
         self.controls_path = self.training_root / "controls.json"
         self.calibrated = set(json.loads(self.controls_path.read_text()).get("calibrated", [])) if self.controls_path.exists() else set()
         self.controls = json.loads(self.controls_path.read_text()) if self.controls_path.exists() else {"move": [0.15, 0.75], "attack": [0.85, 0.75], "radius": 0.10}
         self.events = queue.Queue()
         self.busy = self.running = False
         self.image = self.pending = self.mode = None
+        self.box_edit = None
         self.reward = 0.0
         self.auto_job = None
         selector = tk.Frame(self.root)
@@ -94,7 +98,14 @@ class Console:
         tk.Button(rewards, text="Clear pending reward", command=self.clear_feedback).pack(side="left")
         self.reward_status = tk.StringVar(value="Pending reward: +0")
         tk.Label(rewards, textvariable=self.reward_status).pack(side="left")
-        tk.Label(self.root, text="Labels are saved as bounding boxes for a future visual detector. Rewards train the current Q policy. Pause before labeling.").pack()
+        detection_bar = tk.Frame(self.root)
+        detection_bar.pack()
+        tk.Button(detection_bar, text="Label enemy", command=lambda: self.set_mode("enemy")).pack(side="left")
+        tk.Button(detection_bar, text="Label false detection", command=lambda: self.set_mode("not_enemy")).pack(side="left")
+        tk.Button(detection_bar, text="Cancel box edit", command=self.cancel_box_edit).pack(side="left")
+        self.detection_status = tk.StringVar(value="Enemy detector: label examples to begin.")
+        tk.Label(detection_bar, textvariable=self.detection_status).pack(side="left")
+        tk.Label(self.root, text="Click a detected box to confirm or correct its identity. Label enemy teaches a new character or NPC.").pack()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(100, self.poll)
         self.load_gadget_mode()
@@ -153,6 +164,7 @@ class Console:
             profile = Profile(self.training_root, self.brawler_name.get(), self.mode_name.get())
             folder = profile.prepare()
             agent = Learner(folder / "policy.json")
+            detector = EnemyDetector(folder)
         except (OSError, ValueError) as error:
             self.status.set(str(error))
             return
@@ -163,7 +175,10 @@ class Console:
         self.finish(terminal=True)
         self.agent.save()
         self.profile, self.folder, self.agent = profile, folder, agent
+        self.detector, self.detections = detector, []
+        self.detection_status.set("Enemy detector: capture a frame for this profile.")
         self.mode = self.image = None
+        self.box_edit = None
         self.canvas.delete("all")
         self.brawler_name.set(profile.brawler)
         self.mode_name.set(profile.mode)
@@ -199,7 +214,12 @@ class Console:
             pass
         self.root.after(100, self.poll)
 
-    def show(self, image):
+    def capture_frame(self):
+        image = self.device.screenshot()
+        return image, self.detector.detect(image)
+
+    def show(self, result):
+        image, self.detections = result
         self.image = image
         preview = image.copy()
         preview.thumbnail((960, 540))
@@ -207,27 +227,53 @@ class Console:
         self.photo = ImageTk.PhotoImage(preview)
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, image=self.photo, anchor="nw")
+        w, h = self.preview_size
+        for item in self.detections:
+            x0, y0, x1, y1 = item["box"]
+            self.canvas.create_rectangle(x0*w, y0*h, x1*w, y1*h, outline="red", width=2)
+            identity = item.get("identity", "Unknown")
+            score = item.get("identity_score", 0)
+            self.canvas.create_text(min(x1*w + 4, w - 150), max(12, y0*h), anchor="nw", fill="red",
+                                    text=f"{identity}? {score:.2f}")
+        self.detection_status.set(f"Enemy matches: {len(self.detections)} | Examples: {len(self.detector.samples)}"
+                                  if self.detector.ready else "Enemy detector: label examples to begin.")
 
     def capture(self):
+        if self.mode == "refine":
+            self.status.set("Finish drawing the corrected box or cancel the box edit first.")
+            return
         if not self.running:
-            self.work(self.device.screenshot, self.show)
+            self.work(self.capture_frame, self.show)
 
     def set_mode(self, mode):
         self.pause()
         if self.busy or self.image is None:
             self.status.set("Wait for the current step and capture a frame first.")
             return
+        if self.mode == "refine":
+            self.cancel_box_edit()
         self.mode = mode
-        self.status.set("Drag a box around an object." if mode == "label" else "Click the center of the on-screen control.")
+        self.status.set("Drag a tight box around the character or false detection."
+                        if mode in ("label", "enemy", "not_enemy") else "Click the center of the on-screen control.")
 
     def press(self, event):
-        if not self.mode or self.busy:
+        if self.busy:
+            return
+        if not self.mode:
+            if self.image is None:
+                return
+            w, h = self.preview_size
+            matches = [item for item in self.detections
+                       if item["box"][0] <= event.x/w <= item["box"][2]
+                       and item["box"][1] <= event.y/h <= item["box"][3]]
+            if matches:
+                self.review_detection(max(matches, key=lambda item: item["score"]))
             return
         w, h = self.preview_size
         if not (0 <= event.x < w and 0 <= event.y < h):
             return
         self.origin = (event.x, event.y)
-        if self.mode != "label":
+        if self.mode not in ("label", "enemy", "not_enemy", "refine"):
             self.finish(terminal=True)
             self.controls[self.mode] = [event.x / w, event.y / h]
             self.calibrated.add(self.mode)
@@ -239,25 +285,139 @@ class Console:
             self.box = self.canvas.create_rectangle(event.x, event.y, event.x, event.y, outline="lime", width=2)
 
     def drag(self, event):
-        if self.mode == "label" and hasattr(self, "box"):
+        if self.mode in ("label", "enemy", "not_enemy", "refine") and hasattr(self, "box"):
             self.canvas.coords(self.box, *self.origin, event.x, event.y)
 
     def release(self, event):
-        if self.mode != "label" or not hasattr(self, "box"):
+        if self.mode not in ("label", "enemy", "not_enemy", "refine") or not hasattr(self, "box"):
             return
         w, h = self.preview_size
         x0, x1 = sorted((self.origin[0], max(0, min(event.x, w))))
         y0, y1 = sorted((self.origin[1], max(0, min(event.y, h))))
         if x1 - x0 < 3 or y1 - y0 < 3:
+            self.status.set("Box is too small. Draw it again or cancel the box edit.")
             return
-        label = simpledialog.askstring("Object label", "English label (e.g. player, enemy, health_bar):", parent=self.root)
+        if self.mode == "refine":
+            item, kind = self.box_edit
+            identity = self.ask_identity(item.get("identity", "Unknown"))
+            if identity is not None:
+                self.save_box_feedback(item, "wrong" if identity == "not_enemy" else kind,
+                                       [x0/w, y0/h, x1/w, y1/h], identity)
+            self.cancel_box_edit()
+            return
+        label = self.mode if self.mode != "label" else simpledialog.askstring(
+            "Object label", "English label (e.g. player, enemy, health_bar):", parent=self.root)
+        identity = None
+        if label and label.strip().casefold() == "enemy":
+            identity = self.ask_identity()
+            if identity is None:
+                label = None
+            elif identity == "not_enemy":
+                label, identity = "not_enemy", None
         if label and label.strip():
             name = f"frame-{time.time_ns()}.png"
             self.image.save(self.folder / name)
-            self.log("annotations.jsonl", {"image": name, "label": label.strip(), "box": [x0/w, y0/h, x1/w, y1/h]})
+            self.log("annotations.jsonl", {"image": name, "label": label.strip(), "identity": identity,
+                                            "box": [x0/w, y0/h, x1/w, y1/h]})
             self.status.set(f"Saved label: {label.strip()}")
+            if label.strip().casefold() in ("enemy", "not_enemy"):
+                self.finish(terminal=True)
+                try:
+                    self.detector.learn(self.image, [x0/w, y0/h, x1/w, y1/h], label, identity)
+                    image = self.image.copy()
+                    self.work(lambda: (image, self.detector.detect(image)), self.show)
+                except ValueError as error:
+                    self.status.set(str(error))
         self.mode = None
+        self.canvas.delete(self.box)
         del self.box
+
+    def ask_identity(self, suggestion="Unknown", review=False):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Confirm character identity")
+        dialog.transient(self.root)
+        result = []
+        tk.Label(dialog, text=f"Closest learned identity: {suggestion}\nConfirm it or select the actual character.").pack(padx=16, pady=10)
+        value = tk.StringVar(value="" if suggestion == "Unknown" else suggestion)
+        names = sorted(set(BRAWLERS) | {"NPC"} | {
+            item["identity"] for item in self.detector.samples if item.get("identity")})
+        selector = ttk.Combobox(dialog, textvariable=value, values=names, width=32)
+        selector.pack(padx=16, pady=8)
+
+        def accept(identity):
+            if not identity.strip():
+                return
+            result.append(identity.strip())
+            dialog.destroy()
+
+        tk.Button(dialog, text="Confirm suggestion", state="disabled" if suggestion == "Unknown" else "normal",
+                  command=lambda: accept(suggestion)).pack(fill="x", padx=16)
+        tk.Button(dialog, text="Save correction / new example", command=lambda: accept(value.get())).pack(fill="x", padx=16)
+        tk.Button(dialog, text="Not an enemy", command=lambda: accept("not_enemy")).pack(fill="x", padx=16)
+        if review:
+            tk.Button(dialog, text="Refine box", command=lambda: accept("__refined__")).pack(fill="x", padx=16)
+            tk.Button(dialog, text="Box too broad", command=lambda: accept("__too_broad__")).pack(fill="x", padx=16)
+            tk.Button(dialog, text="Box completely wrong", command=lambda: accept("__wrong__")).pack(fill="x", padx=16)
+        tk.Button(dialog, text="Cancel", command=dialog.destroy).pack(pady=8)
+        dialog.grab_set()
+        selector.focus_set()
+        self.root.wait_window(dialog)
+        return result[0] if result else None
+
+    def review_detection(self, item):
+        self.pause()
+        identity = self.ask_identity(item.get("identity", "Unknown"), review=True)
+        if identity is None:
+            return
+        if identity in ("__refined__", "__too_broad__"):
+            self.mode = "refine"
+            self.box_edit = (dict(item), "refined" if identity == "__refined__" else "too_broad")
+            self.status.set("Draw a new tight rectangle around the actual character on this same frame. Cancel box edit discards this edit.")
+            return
+        if identity == "__wrong__":
+            self.save_box_feedback(item, "wrong")
+            return
+        self.finish(terminal=True)
+        label = "not_enemy" if identity == "not_enemy" else "enemy"
+        identity = identity if label == "enemy" else None
+        try:
+            self.detector.learn(self.image, item["box"], label, identity)
+            name = f"frame-{time.time_ns()}.png"
+            self.image.save(self.folder / name)
+            self.log("annotations.jsonl", {"image": name, "label": label, "identity": identity,
+                                            "box": item["box"], "suggested_identity": item.get("identity", "Unknown")})
+            image = self.image.copy()
+            self.work(lambda: (image, self.detector.detect(image)), self.show)
+            self.status.set("Identity feedback saved. Capture or resume when ready.")
+        except (OSError, ValueError) as error:
+            self.status.set(str(error))
+
+    def cancel_box_edit(self):
+        if self.mode != "refine":
+            return
+        self.mode = None
+        if hasattr(self, "box"):
+            self.canvas.delete(self.box)
+            del self.box
+        self.box_edit = None
+
+    def save_box_feedback(self, item, kind, corrected=None, identity=None):
+        self.finish(terminal=True)
+        try:
+            self.detector.correct_box(self.image, item["box"], kind, corrected, identity)
+            name = f"frame-{time.time_ns()}.png"
+            self.image.save(self.folder / name)
+            self.log("box-feedback.jsonl", {"image": name, "kind": kind, "original_box": item["box"],
+                                            "corrected_box": corrected, "identity": identity,
+                                            "suggested_identity": item.get("identity", "Unknown")})
+            if kind != "wrong":
+                self.log("annotations.jsonl", {"image": name, "label": "enemy", "identity": identity,
+                                                "box": corrected})
+            image = self.image.copy()
+            self.work(lambda: (image, self.detector.detect(image)), self.show)
+            self.status.set("Box feedback saved. Capture or resume when ready.")
+        except (OSError, ValueError) as error:
+            self.status.set(str(error))
 
     def log(self, name, record):
         record = {**record, **self.profile.record()}
@@ -316,15 +476,15 @@ class Console:
             self.running = False
             return
         self.finish()
-        state = state_key(self.image)
+        state = enemy_state(self.image, self.detections, self.detector.ready)
         action = self.agent.choose(state, available_actions(self.controls, self.calibrated))
         def execute():
             self.device.action(ACTIONS[action], self.image.size, self.controls)
             time.sleep(0.15)
-            return self.device.screenshot()
-        def complete(image):
-            self.show(image)
-            self.pending = (state, action, state_key(image))
+            return self.capture_frame()
+        def complete(result):
+            self.show(result)
+            self.pending = (state, action, enemy_state(self.image, self.detections, self.detector.ready))
             self.status.set(f"Action: {ACTIONS[action]} | Learned transitions: {self.agent.steps} | Give feedback now.")
             if self.running:
                 self.auto_job = self.root.after(1500, self.auto_step)
