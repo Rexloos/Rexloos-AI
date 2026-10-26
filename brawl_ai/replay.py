@@ -191,6 +191,7 @@ def render_replay(folder, stage, metadata, duration, state_builder, offset, stop
     write_json(stage/"player-proposals.json", [{"time": sample["time"], "detections": [item for item in sample["detections"] if item.get("kind") == "player"]} for sample in proposals])
     write_json(stage/"review.json", {"version": 1, "brawler": metadata.get("brawler", "Unknown"),
                                      "map": metadata.get("map"), "timing_warning": metadata.get("timing_warning"),
+                                     "controls": metadata.get("controls", {}), "calibrated": metadata.get("calibrated", []),
                                      "frames": review_frames})
     emit_task(events, "replay", expected, expected)
     return output

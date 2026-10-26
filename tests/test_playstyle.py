@@ -25,6 +25,19 @@ def gesture(start, end, started=2, touch_started=None):
 
 
 class PlaystyleTests(unittest.TestCase):
+    def test_later_sessions_accumulate_previous_examples_in_same_profile(self):
+        with tempfile.TemporaryDirectory() as root:
+            for action in ("right", "attack", "right"):
+                model = Playstyle(Path(root)/"one", "Player")
+                model.observe("same-state", action)
+                model.save()
+            loaded = Playstyle(Path(root)/"one", "Player")
+            self.assertEqual(loaded.examples, 3)
+            self.assertEqual(loaded.counts["same-state"][ACTIONS.index("right")], 2)
+            self.assertEqual(loaded.counts["same-state"][ACTIONS.index("attack")], 1)
+            self.assertEqual(Playstyle(Path(root)/"other", "Player").examples, 0)
+            self.assertEqual(Playstyle(Path(root)/"one", "Another player").examples, 0)
+
     def test_motion_preferences_persist_and_only_adjust_imitated_controls(self):
         with tempfile.TemporaryDirectory() as root:
             model = Playstyle(root, "Player")

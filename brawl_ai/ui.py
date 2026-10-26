@@ -290,7 +290,7 @@ class Console:
         try:
             previous = getattr(self, "game_review", None)
             if previous is not None and previous.window.winfo_exists():
-                previous.window.destroy()
+                previous.close()
             # Bind to the recording's profile even if the user later switches.
             folder = self.style.folder.parent.parent
             store = ReviewStore(path.parent, folder)

@@ -3,13 +3,14 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 from PIL import Image, ImageDraw
 
 from brawl_ai.detection import EnemyDetector
 from brawl_ai.hud import HudDetector
 from brawl_ai.player import PlayerDetector
-from brawl_ai.review import ReviewStore, review_candidates
+from brawl_ai.review import GameReview, ReviewStore, review_candidates
 
 
 def fixture(root):
@@ -31,6 +32,52 @@ def fixture(root):
 
 
 class GameReviewTests(unittest.TestCase):
+    def test_new_samples_use_previously_confirmed_models_without_self_training(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder, stage, _ = fixture(root)
+            store = ReviewStore(stage, folder)
+            store.decide(0, 0, True, "entity", [.1, .1, .5, .8], "NPC")
+            before = (folder/"enemy-detector.json").read_text()
+            proposal = {"identity": "NPC", "box": [.2, .2, .6, .9], "score": .97}
+            with patch("brawl_ai.review.EnemyDetector.detect", return_value=[proposal]) as detect:
+                suggestions = store.suggest(1)
+            detect.assert_called_once()
+            store.update_suggestions(1, suggestions)
+            self.assertEqual(store.data["frames"][1]["items"][0]["identity"], "NPC")
+            self.assertEqual(store.data["frames"][1]["items"][0]["decision"], "pending")
+            self.assertEqual((folder/"enemy-detector.json").read_text(), before)
+
+    def test_rescan_preserves_human_decisions_and_suppresses_duplicates(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder, stage, _ = fixture(root)
+            store = ReviewStore(stage, folder)
+            store.decide(0, 0, True, "entity", [.1, .1, .5, .8], "NPC")
+            store.decide(0, 1, False, "control", [.6, .4, .9, .9], control="attack")
+            human = list(store.data["frames"][0]["items"])
+            store.update_suggestions(0, [
+                {"identity": "Wrong", "box": [.1, .1, .5, .8], "decision": "confirmed"},
+                {"kind": "control", "control": "attack", "box": [.6, .4, .9, .9]},
+                {"kind": "control", "control": "attack", "box": [.05, .85, .15, 1]},
+                {"identity": "New NPC", "box": [.6, .05, .9, .25]}])
+            items = ReviewStore(stage, folder).data["frames"][0]["items"]
+            self.assertEqual(items[:2], human)
+            self.assertEqual(len(items), 4)
+            self.assertTrue(all(item["decision"] == "pending" for item in items[2:]))
+
+    def test_late_background_result_cannot_replace_new_correction_or_active_edit(self):
+        import queue
+        for stale, editing in ((True, False), (False, True)):
+            view = GameReview.__new__(GameReview)
+            view.closed = False
+            view.index, view.revision, view.editing = 0, 2, editing
+            view.scan_results = queue.Queue()
+            view.scan_results.put((0, 1 if stale else 2, [], None))
+            view.store = Mock()
+            view.start_scan = Mock()
+            view.window = Mock()
+            view.poll_scan()
+            view.store.update_suggestions.assert_not_called()
+
     def test_pending_proposals_do_not_train_and_calibration_is_only_a_hint(self):
         with tempfile.TemporaryDirectory() as root:
             folder, stage, _ = fixture(root)

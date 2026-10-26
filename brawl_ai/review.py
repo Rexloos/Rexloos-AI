@@ -2,12 +2,14 @@
 import copy
 import json
 from pathlib import Path
+import queue
+import threading
 
 from PIL import Image, ImageStat, ImageTk
 
-from .detection import ENTITY_NAMES, EnemyDetector
+from .detection import ENTITY_NAMES, EnemyDetector, overlap
 from .hud import CONTROLS, STATES, HudDetector
-from .player import PlayerDetector
+from .player import PlayerDetector, merge_player
 from .profiles import normalize
 
 
@@ -47,6 +49,39 @@ class ReviewStore:
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(self.data))
         temporary.replace(self.path)
+
+    def suggest(self, index):
+        """Read the latest human-taught models; never train on these predictions."""
+        image = self.image(index)
+        metadata = self.data
+        if "controls" not in metadata:
+            session = self.stage.parent.parent/"session.json"
+            metadata = json.loads(session.read_text()) if session.exists() else {}
+        enemies = EnemyDetector(self.profile_folder).detect(image)
+        controls = HudDetector(self.profile_folder).detect(image, metadata.get("controls", {}), metadata.get("calibrated", []))
+        player = PlayerDetector(self.profile_folder, self.data["brawler"]).detect(image)
+        return review_candidates(merge_player(enemies+controls, player), metadata, image.size)
+
+    def update_suggestions(self, index, suggestions):
+        frame = self.data["frames"][index]
+        human = [item for item in frame["items"] if item["decision"] != "pending"]
+        def resolved(candidate):
+            kind = candidate.get("kind", "entity")
+            for item in human:
+                old_kind = item.get("kind", "entity")
+                if kind == old_kind:
+                    if kind == "control":
+                        if item.get("control") != candidate.get("control"):
+                            continue
+                        if item["decision"] == "confirmed" or overlap(item["box"], candidate["box"]) >= .3:
+                            return True
+                    elif overlap(item["box"], candidate["box"]) >= .3:
+                        return True
+                if kind == "entity" and old_kind == "player" and item["decision"] == "confirmed" and overlap(item["box"], candidate["box"]) >= .3:
+                    return True
+            return False
+        frame["items"] = human+[dict(copy.deepcopy(item), decision="pending") for item in suggestions if not resolved(item)]
+        self.save()
 
     def teach(self, image, item, accepted):
         box = item["box"]
@@ -118,6 +153,11 @@ class GameReview:
         from tkinter import ttk
         self.store, self.changed = store, changed
         self.index, self.selected, self.box = 0, None, None
+        self.revision = 0
+        self.refreshed = set()
+        self.scan_running = False
+        self.scan_results = queue.Queue(maxsize=1)
+        self.closed = self.editing = False
         self.window = tk.Toplevel(root)
         self.window.title(f"Review recorded game - {store.data['brawler']}")
         tk.Label(self.window, text="Review samples across the whole game. Select a box to confirm/correct/reject, or draw a missing object.").pack(padx=8, pady=6)
@@ -158,13 +198,16 @@ class GameReview:
         tk.Button(buttons, text="Confirm / save correction", command=lambda: self.commit(True)).pack(side="left")
         tk.Button(buttons, text="Reject proposal", command=lambda: self.commit(False)).pack(side="left")
         tk.Button(buttons, text="Add missing object", command=self.add).pack(side="left")
-        tk.Button(buttons, text="Close (progress saved)", command=self.window.destroy).pack(side="left")
+        tk.Button(buttons, text="Close (progress saved)", command=self.close).pack(side="left")
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.status = tk.StringVar()
         tk.Label(self.window, textvariable=self.status, wraplength=1000).pack(pady=6)
         self.load()
+        self.scan_job = self.window.after(50, self.poll_scan)
 
-    def load(self):
+    def load(self, refresh=True):
         self.selected, self.box = None, None
+        self.editing = False
         self.image = self.store.image(self.index)
         self.image.thumbnail((960, 540))
         self.photo = ImageTk.PhotoImage(self.image)
@@ -178,6 +221,51 @@ class GameReview:
         self.status.set(f"Sample {self.index+1}/{len(self.store.data['frames'])} | {frame['time']:.1f}s | {pending} pending proposals. Missing entities need human labels.")
         if self.store.data.get("timing_warning"):
             self.status.set(self.status.get()+" "+self.store.data["timing_warning"])
+        if refresh:
+            self.start_scan()
+
+    def start_scan(self):
+        if self.closed or self.scan_running or self.editing or (self.index, self.revision) in self.refreshed:
+            return
+        index, revision = self.index, self.revision
+        self.scan_running = True
+        self.status.set(self.status.get()+" | Updating proposals from previous human examples...")
+        def scan():
+            try:
+                result = (index, revision, self.store.suggest(index), None)
+            except Exception as error:
+                result = (index, revision, None, str(error))
+            self.scan_results.put_nowait(result)
+        threading.Thread(target=scan, daemon=True).start()
+
+    def poll_scan(self):
+        if self.closed:
+            return
+        try:
+            index, revision, suggestions, error = self.scan_results.get_nowait()
+            self.scan_running = False
+            if revision == self.revision and not (index == self.index and self.editing):
+                if error:
+                    if index == self.index:
+                        self.status.set(f"Proposal update failed; saved proposals retained: {error}")
+                    self.refreshed.add((index, revision))
+                else:
+                    self.store.update_suggestions(index, suggestions)
+                    self.refreshed.add((index, revision))
+                    if index == self.index:
+                        self.load(refresh=False)
+        except queue.Empty:
+            pass
+        except (OSError, ValueError) as error:
+            self.status.set(f"Could not save updated proposals: {error}")
+            self.refreshed.add((index, revision))
+        self.start_scan()
+        self.scan_job = self.window.after(50, self.poll_scan)
+
+    def close(self):
+        self.closed = True
+        self.window.after_cancel(self.scan_job)
+        self.window.destroy()
 
     def draw(self):
         self.canvas.delete("all")
@@ -198,6 +286,7 @@ class GameReview:
         if not selected:
             return
         self.selected = selected[0]
+        self.editing = True
         item = self.store.data["frames"][self.index]["items"][self.selected]
         self.box = list(item["box"])
         self.kind.set(item.get("kind", "entity"))
@@ -210,6 +299,7 @@ class GameReview:
         return [max(0, min(1, event.x/self.image.width)), max(0, min(1, event.y/self.image.height))]
 
     def press(self, event):
+        self.editing = True
         self.origin = self.point(event)
 
     def drag(self, event):
@@ -232,6 +322,7 @@ class GameReview:
                 return
 
     def add(self):
+        self.editing = True
         self.selected, self.box = None, None
         self.items.selection_clear(0, "end")
         self.draw()
@@ -244,6 +335,8 @@ class GameReview:
             self.store.decide(self.index, self.selected, accepted, self.kind.get(), self.box,
                               self.identity.get(), self.control.get(), self.state.get())
             self.changed()
+            self.revision += 1
+            self.refreshed.clear()
             self.load()
         except (OSError, ValueError, KeyError) as error:
             self.status.set(f"Could not save review: {error}")
