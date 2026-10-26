@@ -95,15 +95,20 @@ class Console:
         from tkinter.scrolledtext import ScrolledText
         self.activity_text = ScrolledText(self.activity_window, width=110, height=24, state="disabled", wrap="word")
         self.activity_text.pack(fill="both", expand=True)
+        self.activity_rendered = None
         self.render_activity()
 
     def render_activity(self):
         if self.activity_text is not None and self.activity_text.winfo_exists():
+            lines = self.activity.snapshot()
+            if lines == getattr(self, "activity_rendered", None):
+                return
             at_bottom = self.activity_text.yview()[1] >= .99
             position = self.activity_text.yview()[0]
             self.activity_text.configure(state="normal")
             self.activity_text.delete("1.0", "end")
-            self.activity_text.insert("end", "\n".join(self.activity.snapshot()))
+            self.activity_text.insert("end", "\n".join(lines))
+            self.activity_rendered = lines
             self.activity_text.configure(state="disabled")
             self.activity_text.yview_moveto(1 if at_bottom else position)
 

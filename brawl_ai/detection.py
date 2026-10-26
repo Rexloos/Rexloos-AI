@@ -116,11 +116,14 @@ class EnemyDetector:
                      for sample in samples if sample["label"] == "not_enemy"]
         rejected = [(sample, Image.frombytes("RGB", (12, 12), bytes(sample["pixels"])))
                     for sample in rejected_boxes]
-        candidates = []
-
         def similarity(a, b):
-            return 1 - sum(ImageStat.Stat(ImageChops.difference(a, b)).mean) / (3 * 255)
+            # All templates are 12x12 RGB. Sum the tiny buffer directly instead
+            # of building three 256-bin histograms for every search position.
+            pixels = ImageChops.difference(a, b).tobytes()
+            return 1 - sum(sum(pixels[channel::3]) / 144 for channel in range(3)) / (3 * 255)
 
+        scans = {}
+        candidate_groups = []
         for sample in positives:
             template = Image.frombytes("RGB", (12, 12), bytes(sample["pixels"]))
             for scale in (0.85, 1.0, 1.15):
@@ -128,10 +131,17 @@ class EnemyDetector:
                 h = max(4, round(sample["size"][1] * height * scale))
                 if w > width or h > height:
                     continue
-                stride = max(2, min(w, h) // 5)
-                for y in range(0, height - h + 1, stride):
-                    for x in range(0, width - w + 1, stride):
-                        patch = frame.crop((x, y, x + w, y + h)).resize((12, 12))
+                matches = []
+                candidate_groups.append(matches)
+                scans.setdefault((w, h), []).append((template, matches))
+        # Templates with the same geometry share crops without retaining a frame's
+        # worth of patches. Keep original template/scale order for tied scores.
+        for (w, h), templates in scans.items():
+            stride = max(2, min(w, h) // 5)
+            for y in range(0, height - h + 1, stride):
+                for x in range(0, width - w + 1, stride):
+                    patch = frame.crop((x, y, x + w, y + h)).resize((12, 12))
+                    for template, matches in templates:
                         score = similarity(template, patch)
                         if score < self.threshold:
                             continue
@@ -142,8 +152,9 @@ class EnemyDetector:
                             continue
                         if any(similarity(negative, patch) >= score - 0.02 for negative in negatives):
                             continue
-                        candidates.append({"box": [x / width, y / height, (x + w) / width, (y + h) / height],
-                                           "score": score})
+                        matches.append({"box": [x / width, y / height, (x + w) / width, (y + h) / height],
+                                        "score": score})
+        candidates = [candidate for group in candidate_groups for candidate in group]
         selected = []
         for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True):
             if all(overlap(candidate["box"], old["box"]) < 0.3 for old in selected):

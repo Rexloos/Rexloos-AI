@@ -3,16 +3,29 @@ import bisect
 import io
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from PIL import Image
+from PIL import Image, ImageFont
 
-from brawl_ai.replay import draw_overlay, read_exact, touch_timeline
+from brawl_ai.replay import draw_overlay, overlay_font, read_exact, touch_timeline
 from brawl_ai.ui import Console
 from test_recordings import recording_fixture
 
 
 class ReplayTests(unittest.TestCase):
+    def test_overlay_reuses_font_for_same_frame_size(self):
+        overlay_font.cache_clear()
+        try:
+            with patch("brawl_ai.replay.ImageFont.truetype", wraps=ImageFont.truetype) as load:
+                frame = Image.new("RGB", (640, 360))
+                first = draw_overlay(frame, 1, [], [], [])
+                calls = load.call_count
+                second = draw_overlay(frame, 1, [], [], [])
+                self.assertEqual(load.call_count, calls)
+                self.assertEqual(first.tobytes(), second.tobytes())
+        finally:
+            overlay_font.cache_clear()
+
     def test_recorded_finger_motion_is_labeled_and_disappears_on_release(self):
         with tempfile.TemporaryDirectory() as root:
             _, folder, metadata = recording_fixture(root, False)

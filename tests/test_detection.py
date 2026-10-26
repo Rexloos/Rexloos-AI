@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PIL import Image, ImageDraw
 
@@ -22,6 +22,20 @@ def character():
 
 
 class DetectionTests(unittest.TestCase):
+    def test_equal_size_templates_share_crops_and_preserve_results(self):
+        with tempfile.TemporaryDirectory() as root:
+            detector = EnemyDetector(root)
+            image = character()
+            detector.learn(image, [0, 0, 1, 1], "enemy", "NPC")
+            original_crop = Image.Image.crop
+            with patch.object(Image.Image, "crop", autospec=True, side_effect=original_crop) as crop:
+                expected = detector.detect(image)
+                original_count = crop.call_count
+            detector.samples *= 12
+            with patch.object(Image.Image, "crop", autospec=True, side_effect=original_crop) as crop:
+                self.assertEqual(detector.detect(image), expected)
+                self.assertEqual(crop.call_count, original_count)
+
     def test_broad_box_correction_preserves_character_as_positive(self):
         with tempfile.TemporaryDirectory() as root:
             image = Image.new("RGB", (40, 40), "green")

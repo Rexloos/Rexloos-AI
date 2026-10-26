@@ -1,5 +1,6 @@
 """Render and play an analyzed game with touch paths and character proposals."""
 import bisect
+from functools import lru_cache
 import json
 import math
 from pathlib import Path
@@ -55,14 +56,19 @@ def touch_timeline(folder, metadata, offset):
     return timeline
 
 
+@lru_cache(maxsize=16)
+def overlay_font(size):
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size)
+    except OSError:
+        return ImageFont.load_default()
+
+
 def draw_overlay(image, stamp, timeline, times, detections, recognition_ready=True):
     image = image.copy().convert("RGB")
     draw = ImageDraw.Draw(image)
     w, h = image.size
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", max(12, w//64))
-    except OSError:
-        font = ImageFont.load_default()
+    font = overlay_font(max(12, w//64))
     def label(x, y, text, color):
         bounds = draw.textbbox((0, 0), text, font=font)
         x, y = max(0, min(x, w-bounds[2]-4)), max(0, min(y, h-bounds[3]-4))
