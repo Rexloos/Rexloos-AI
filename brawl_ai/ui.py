@@ -779,8 +779,23 @@ class Console:
         self.status.set(f"Console error: {error}. Details are in the terminal; try Capture again.")
 
     def capture_frame(self):
+        started = time.monotonic()
         image = self.device.screenshot()
-        return image, self.detect_scene(image)
+        captured = time.monotonic()
+        detections = self.detect_scene(image)
+        recognized = time.monotonic()
+        activity = getattr(self, "activity", None)
+        if activity is not None:
+            metrics = getattr(self.device, "capture_metrics", {})
+            detail = ""
+            if isinstance(metrics, dict) and metrics:
+                detail = (f" | {metrics['backend']} | transfer {metrics['transfer_seconds']:.3f}s"
+                          f" | decode {metrics['decode_seconds']:.3f}s | next {metrics['next_backend']}")
+                if metrics.get("fallback"):
+                    activity.add("capture_fallback", f"Raw capture unavailable; using PNG: {metrics['fallback']}")
+            activity.add("capture", f"Screenshot {captured-started:.3f}s | recognition {recognized-captured:.3f}s"
+                         f" | total {recognized-started:.3f}s{detail}", interval=2)
+        return image, detections
 
     def detect_scene(self, image):
         detections = self.detector.detect(image)

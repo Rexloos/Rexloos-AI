@@ -6,7 +6,9 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import struct
 import tempfile
+import time
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
@@ -124,17 +126,79 @@ def usb_serial():
     return serial
 
 
+def decode_raw_screenshot(data):
+    """Read Android screencap's packed pixels, with legacy or color-space header."""
+    from PIL import Image
+    if len(data) < 12:
+        raise ValueError("Incomplete raw screenshot header.")
+    width, height, pixel_format = struct.unpack_from("<3I", data)
+    modes = {1: ("RGBA", 4), 2: ("RGBX", 4), 3: ("RGB", 3), 5: ("BGRA", 4)}
+    if not (0 < width <= 16384 and 0 < height <= 16384) or pixel_format not in modes:
+        raise ValueError("Unsupported raw screenshot dimensions or pixel format.")
+    raw_mode, channels = modes[pixel_format]
+    count = width*height*channels
+    header = len(data)-count
+    if header not in (12, 16):
+        raise ValueError("Incomplete or unsupported raw screenshot payload.")
+    if header == 16 and struct.unpack_from("<I", data, 12)[0] not in (0, 1):
+        raise ValueError("Raw screenshot color space requires PNG conversion.")
+    mode = "RGBA" if raw_mode == "BGRA" else raw_mode
+    return Image.frombytes(mode, (width, height), data[header:], "raw", raw_mode).convert("RGB")
+
+
 class Device:
-    def __init__(self, serial):
+    def __init__(self, serial, capture_mode=None):
         self.serial = serial
         self.adb = adb_path()
+        self.capture_mode = capture_mode or os.environ.get("BRAWL_AI_CAPTURE", "auto")
+        if self.capture_mode not in ("auto", "png", "raw"):
+            raise ValueError("BRAWL_AI_CAPTURE must be auto, png or raw.")
+        self.capture_backend = "png" if self.capture_mode == "auto" else self.capture_mode
+        self.capture_metrics = {}
+        self._png_capture_seconds = None
+        self._capture_compared = self.capture_mode != "auto"
 
     def command(self, *args):
         return run([self.adb, "-s", self.serial, *args], capture_output=True, timeout=15).stdout
 
     def screenshot(self):
         from PIL import Image
-        return Image.open(io.BytesIO(self.command("exec-out", "screencap", "-p"))).convert("RGB")
+        # Probe on the next request, never take two screenshots for one result.
+        backend = self.capture_backend
+        if not self._capture_compared and self._png_capture_seconds is not None:
+            backend = "raw"
+        started = time.monotonic()
+        fallback = None
+        if backend == "raw":
+            try:
+                data = self.command("exec-out", "screencap")
+                transferred = time.monotonic()
+                image = decode_raw_screenshot(data)
+            except (ValueError, OSError, subprocess.SubprocessError) as error:
+                # A connection/format failure cannot leave capture stuck on raw.
+                fallback = str(error)
+                backend = self.capture_backend = "png"
+                self._capture_compared = True
+        if backend == "png":
+            data = self.command("exec-out", "screencap", "-p")
+            transferred = time.monotonic()
+            with Image.open(io.BytesIO(data)) as frame:
+                image = frame.convert("RGB")
+        finished = time.monotonic()
+        elapsed = finished-started
+        if not self._capture_compared:
+            if backend == "png":
+                self._png_capture_seconds = elapsed
+            else:
+                # Require a meaningful win before increasing USB traffic.
+                self.capture_backend = "raw" if elapsed < self._png_capture_seconds*.9 else "png"
+                self._capture_compared = True
+        next_backend = "raw" if not self._capture_compared and self._png_capture_seconds is not None else self.capture_backend
+        self.capture_metrics = {"backend": backend, "next_backend": next_backend,
+                                "transfer_seconds": transferred-started,
+                                "decode_seconds": finished-transferred,
+                                "total_seconds": elapsed, "bytes": len(data), "fallback": fallback}
+        return image
 
     def action(self, action, size, controls):
         width, height = size
