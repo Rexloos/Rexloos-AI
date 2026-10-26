@@ -62,6 +62,7 @@ class ProfileTests(unittest.TestCase):
             console.brawler_name = Mock(get=Mock(return_value="Colt"))
             console.mode_name = Mock(get=Mock(return_value="Heist"))
             console.load_gadget_mode = Mock()
+            console.load_style = Mock()
             console.stop_capture = Mock()
             console.switch_profile()
             old = Learner(old_folder / "policy.json")

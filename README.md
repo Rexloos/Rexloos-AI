@@ -11,6 +11,7 @@ Python downloads and launches the official Android Emulator (QEMU); this project
 - Capture the game through ADB and calibrate movement and attack controls visually.
 - Start a tabular Q policy from zero, explore actions, learn from positive and negative human feedback, and resume saved learning.
 - Learn enemy appearance examples and false-detection corrections from human bounding boxes, then display matches and include their locations in policy states.
+- Observe the player's own USB phone gestures, save demonstrations, and optionally mix learned action preferences into AI decisions.
 
 This is a working development baseline, not a trained player. The visual representation combines a coarse 4 × 3 grayscale grid with enemy locations once the profile has enemy examples. Enemy recognition uses a small appearance template bank learned from human annotations, without pretrained weights. Other object labels are stored but do not train recognition. It has no automatic health/damage reward extraction, match navigation, automatic resets, targeting model or simultaneous multi-touch controls. Movement uses short swipes and attack uses the game's attack button. Meaningful autonomous gameplay needs those later components; learning from scratch using only live screen interaction can take substantial time.
 
@@ -139,6 +140,34 @@ python -m brawl_ai teach --brawler "Shelly" --mode "Solo Showdown"
 
 Closing the console commits the last completed transition and saves the policy. ADB operations run in a background thread so the interface can respond. Device commands time out after 15 seconds. Capture errors stop continuous stepping.
 
+### Learn a player's playstyle from the USB phone
+
+This optional mode learns from demonstrations you record yourself. New models still start with no bundled demonstrations or pretrained weights. It does not require a downloaded player model.
+
+1. Connect the Android phone over USB, select the correct brawler/mode profile and confirm the map. Open actual gameplay and calibrate movement, attack and any optional controls you want recorded.
+2. Click **Learn player playstyle...**. Enter a player name. **Load style** opens that player's saved examples in the current brawler/mode profile; new names start empty.
+3. Choose **Preview phone input**, then touch controls on the phone. Check the cyan marker in the console against your finger position. If it is rotated or mirrored relative to the screen, stop observation, select another **Touch rotation** (`0`, `90`, `180` or `270`) and preview again. These are rotations, not arbitrary reflection correction. The default `90` is a starting point, not automatic orientation detection. A marker appears after a gesture or periodic held-touch segment and updates with screenshots, not as a low-latency live video overlay.
+4. Stop preview. Once alignment is correct, check **I checked touch alignment in preview** and click **Record full game**. Select a **Video FPS limit** of 15, 30 or 60 (default 30). The input preview gap only controls calibration preview; it does not limit recorded video to screenshot cadence. Rotation changes clear the alignment checkbox.
+5. Wait for the recording-started status, then play on the phone. Video is encoded by the phone and written continuously as `game.mkv` using [scrcpy recording](https://github.com/Genymobile/scrcpy/blob/master/doc/recording.md), without playback, audio or device control. Raw timestamped input is written alongside it. No enemy recognition, state extraction, demonstration training or periodic screenshots run during this phase. The actual frame rate depends on the phone and game; the FPS setting is a limit, not a guarantee of constant-rate capture. The recording is not subject to Android screenrecord's three-minute limit.
+6. After the match click **Stop / cancel analysis**, then wait for the video to finalize. The saved game appears under **Saved game**. Recording alone does not change the player model. Raw video and touches are retained so analysis can be done later, including after restarting the console and loading the same player/profile. Capture uses the selected screen orientation locked at startup; do not rotate the phone during a recording.
+7. Use **Preview recorded action** with different **Action** numbers to inspect frames immediately before observed actions and the overlaid touch origin. Adjust **Video/input offset (seconds)** if the frame and action do not line up; a positive offset associates the gesture with a later point in the video. Check **I checked video/input synchronization** once verified. Selecting another recording or editing the offset clears that confirmation. Initial synchronization uses a host log timestamp estimate; it is not claimed to be frame-exact automatically. You may inspect `game.mkv` with a video player for more context.
+8. Click **Analyze saved game and learn**. FFmpeg extracts preceding frames, the enemy detector computes visual state, and touch gestures become discrete action demonstrations. Progress is shown in the playstyle window. **Stop / cancel analysis** cancels the analysis without applying a partially analyzed game to the model. Original recordings remain available. A successfully analyzed recording is tracked in the player model and cannot be counted twice.
+9. Enable **Use loaded player style for AI decisions** and set **Imitation influence**. For example, `0.7` gives the style a 70% chance to supply each action; otherwise the reward-based policy decides. `0` uses only the reward policy. If the selected style has no applicable examples or available actions, the reward policy is used even at `1`. Start AI stepping and continue assigning your own rewards as usual.
+
+Full-game recording and analysis require `scrcpy` (with the current `--capture-orientation` and `--no-playback` options), `ffmpeg` and `ffprobe` on PATH. Missing tools produce an error before recording. These tools were present on the development host; setup does not install them automatically. scrcpy is given the project's ADB executable and selected serial so it targets the same phone. Capture errors leave the raw session marked failed and do not train a model.
+
+The style model counts demonstrated actions per visual state. Once a state has at least three applicable examples, it samples from those counts; otherwise it uses that player's action frequencies on the same confirmed map, or the unassigned-map context. It does not mix examples between different players, brawlers, modes or map contexts. An unknown map does not borrow another map's preferences. This is a basic supervised preference model, not a neural behavior-cloning system, tactical understanding, exact trajectory reproduction or a promise to learn an entire playstyle. Samples are not labeled with fabricated positive rewards, do not increment the reinforcement learner's transition count, and do not count as proof of mastery in recommendations. Human reward updates remain independent of demonstration counts. Imitation settings start off when the console opens.
+
+During calibration preview, full-game capture and post-game analysis, ordinary auto capture is stopped. AI actions, labeling, profile/map changes and control recalibration are blocked until the session stops, so a recording cannot silently cross profiles or maps. Record one match with the same brawler, mode, map and control layout, stopping before navigating menus or changing them. The recorder does not detect whether Brawl Stars is in the foreground and cannot infer that a menu gesture is not gameplay. Closing the console first requests a clean stop/cancellation; close it again after the stopped status appears.
+
+Input is read using Android's [getevent tool](https://source.android.com/docs/core/interaction/input/getevent), with [type-A contacts and type-B slots](https://www.kernel.org/doc/html/latest/input/multi-touch-protocol.html). Exactly one readable multitouch touchscreen is currently supported. Some phones deny input-device access even when USB debugging is enabled; this mode reports the limitation without trying to root the phone or change permissions. Anonymous simultaneous type-A contacts without tracking IDs are rejected because they cannot be paired reliably. Event loss or queue overflow stops observation rather than silently training on corrupted input.
+
+Offline analysis reconstructs type-A/type-B touches, splits held motion into roughly half-second segments and samples touch-free pauses at most once per second after input begins. Touch positions near calibrated controls become the existing discrete actions. Simultaneous fingers yield separate examples but not simultaneous AI execution. Diagonal movement becomes the dominant cardinal direction, and normal attack aiming is reduced to `attack`. Input events use their device monotonic timestamps, related to the host timeline by the smallest observed host/device offset. The recorder-start log provides an approximate video origin; USB startup/buffering and manual offset error can still misalign examples. Analysis selects a frame at least 40 ms before the associated action, rejects gaps over one second, and ignores unsupported/out-of-video actions. It uses the recording's saved calibration and map, not any subsequently edited map field.
+
+Analysis stages example journals and JPEG reference frames locally, computes preferences in a separate model instance, then applies one atomic model save after the entire analysis succeeds. A failed/cancelled analysis keeps the existing model intact; staging files and raw video remain for inspection. Only frames referenced by examples are extracted. Audio is not recorded. All files live outside the repository in the local profile cache, and reward policies remain intact. Legacy screenshot-based demonstrations are preserved.
+
+Verification: the connected HONOR's touchscreen capabilities were readable via `adb getevent -lp`, including its type-A coordinate ranges. Automated tests cover both input protocols, rotations, mapping, profile/map isolation, imitation selection, capture without training, cancellation, atomic application and duplicate prevention. FFmpeg integration tests encode/decode an actual synthetic video and learn its scripted actions. Full-game scrcpy capture, synchronization accuracy, gameplay imitation quality and the GUI workflow have not been manually verified on the phone.
+
 ### Automatic preview capture
 
 Enable **Auto capture** to refresh screenshots and enemy/map recognition without sending game actions. Set **Interval / minimum (seconds)** from `0.2` to `60` and click **Apply capture settings**. With **Adaptive** unchecked, this is the target time between capture starts. If processing takes longer, captures wait for completion and leave at least 0.1 seconds before the next one; frames never build up in a queue.
@@ -206,6 +235,19 @@ Default layout:
         box-feedback.jsonl  # Original/corrected rectangles and rejection reasons
         map-examples.jsonl  # Confirmed map names and screenshot filenames
         map-frame-*.png     # Human-confirmed map examples
+        playstyles/<player-key>/
+          style.json       # Action counts learned from this player's demonstrations
+          demonstrations.jsonl # States, gestures, actions and session/map metadata
+          frame-*.jpg      # Only frames referenced by demonstrations
+          recordings/<session-id>/
+            session.json   # Profile/map, calibration, timing and capture status
+            game.mkv       # Continuous game video, without audio
+            input.jsonl    # Raw device input and host/device timestamps
+            recorder.log   # scrcpy startup and capture diagnostics
+            analyses/<analysis-id>/
+              examples.jsonl # Offline action/state examples
+              result.json  # Analysis parameters and recording token
+              frame-*.jpg  # Reference frames used by the analysis
         frame-*.png         # Annotated screenshots for this combination
 ```
 

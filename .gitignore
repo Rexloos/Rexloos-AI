@@ -10,6 +10,7 @@ avd/
 data/
 runs/
 checkpoints/
+training/
 *.apk
 *.aab
 *.img
@@ -18,3 +19,5 @@ checkpoints/
 *.pt
 *.pth
 *.onnx
+*.mkv
+*.mp4

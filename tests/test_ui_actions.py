@@ -45,10 +45,28 @@ def console_fixture(folder):
     console.work_kind = None
     console.preview_revision = 0
     console.deferred_preview = None
+    console.player_session = None
+    console.use_style = Mock(get=Mock(return_value=False))
     return console
 
 
 class UiActionTests(unittest.TestCase):
+    @patch("brawl_ai.ui.time.sleep")
+    @patch("brawl_ai.ui.random.random", return_value=0)
+    def test_loaded_player_style_can_override_reward_policy_choice(self, random, sleep):
+        with tempfile.TemporaryDirectory() as folder:
+            console = console_fixture(folder)
+            console.use_style.get.return_value = True
+            console.style_strength = Mock(get=Mock(return_value=1))
+            console.style = Mock()
+            console.style.choose.return_value = ACTIONS.index("attack")
+            console.capture_frame = Mock(return_value=(console.image, []))
+            console.one_step()
+            operation, callback = console.work.call_args.args
+            callback(operation())
+            console.device.action.assert_called_once_with("attack", (160, 90), console.controls)
+            self.assertEqual(console.pending[1], ACTIONS.index("attack"))
+
     def test_click_reviews_displayed_box_without_waiting_for_preview(self):
         with tempfile.TemporaryDirectory() as folder:
             console = console_fixture(folder)
