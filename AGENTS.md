@@ -11,6 +11,7 @@
 - Keep large assets out of Git: Android SDK packages, emulator disks, APKs, screenshots, datasets, and model checkpoints belong in the local cache, outside the repository by default.
 - Maintain `.gitignore` entries for generated and large local assets.
 - Do not commit or push unless the user explicitly requests it.
+- After completing repository changes, automatically include a suggested English commit message in the final response. Inspect all staged, unstaged, and untracked changes first, and base the suggestion on the full uncommitted scope rather than only the latest edit. Do not create a commit unless explicitly requested. If there are no uncommitted changes, omit the suggestion.
 
 ## Product direction
 
