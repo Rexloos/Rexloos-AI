@@ -10,8 +10,10 @@
 - Use `apply_patch` to create and edit files.
 - Keep large assets out of Git: Android SDK packages, emulator disks, APKs, screenshots, datasets, and model checkpoints belong in the local cache, outside the repository by default.
 - Maintain `.gitignore` entries for generated and large local assets.
-- Do not commit or push unless the user explicitly requests it.
-- After completing repository changes, automatically include a suggested English commit message in the final response. Inspect all staged, unstaged, and untracked changes first, and base the suggestion on the full uncommitted scope rather than only the latest edit. Do not create a commit unless explicitly requested. If there are no uncommitted changes, omit the suggestion.
+- After every completed user prompt, run `bash scripts/auto_commit.sh "<English commit title>"` from the repository. The user authorizes these local commits automatically; do not ask for confirmation. A later user instruction to avoid committing takes precedence.
+- Before running the script, inspect all staged, unstaged, and untracked changes, run the relevant checks, and choose a concise English commit title covering the full uncommitted scope, not only the latest edit. Keep generated/large local assets out of the commit. Do not commit unfinished work or changes with unresolved check failures; report why the commit was not created.
+- The script stages repository changes and creates a local commit with the proposed title. If there are no changes, it exits successfully without creating an empty commit. Use a neutral title such as `chore: update project` for the no-change invocation. Report the actual commit title and short hash in the final response when a commit is created.
+- Never push automatically. This workflow authorizes local commits only; pushing requires a separate explicit user request. If committing fails, report the failure and preserve the changes; do not reset or discard them.
 
 ## Product direction
 
