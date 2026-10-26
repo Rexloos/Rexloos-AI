@@ -16,9 +16,9 @@ This is a working development baseline, not a trained player. The current visual
 
 ## Requirements
 
-Linux x86_64, Python 3.11+, Java 17+, Tkinter, internet access for setup, and working KVM virtualization. Pillow is the only Python dependency. On Arch/CachyOS, system packages are typically `python`, `tk`, and `jdk17-openjdk` (or a newer JDK).
+Linux x86_64, Python 3.11+, Java 17+, Tkinter, internet access for setup, and working KVM virtualization. Pillow is the only Python dependency.
 
-The target laptop has an i3-1115G4, approximately 8 GB RAM and Intel integrated graphics. This baseline trains on CPU. Close memory-heavy applications before starting Android. The emulator still consumes several GB of disk space locally; keeping Git small does not remove that requirement.
+This baseline trains on CPU. The emulator still consumes several GB of disk space locally; keeping Git small does not remove that requirement.
 
 ## Start
 
@@ -35,7 +35,7 @@ python -m brawl_ai emulator
 
 Setup downloads several GB into `~/.cache/brawl-ai`. Android SDK license acceptance is interactive. Downloads are resolved from Google's official repository and command-line tools are checksum-verified. Setup can be rerun after interruption. It does not install system packages or alter kernel configuration.
 
-If `doctor` reports inaccessible KVM, enable Intel VT-x in firmware and configure access to `/dev/kvm` on the host. Restart your login session after changes to group membership. A restricted sandbox may hide KVM even when it works on the host. The launcher fails clearly rather than silently attempting unusably slow software emulation.
+If `doctor` reports inaccessible KVM, enable hardware virtualization in firmware and configure access to `/dev/kvm` on the host. Restart your login session after changes to group membership. A restricted sandbox may hide KVM even when it works on the host. The launcher fails clearly rather than silently attempting unusably slow software emulation.
 
 Open Google Play inside Android and install Brawl Stars yourself. Game compatibility with the emulator, image, architecture and current game version must be checked on the actual device; it is not guaranteed. A legally obtained local APK can alternatively be installed with:
 
