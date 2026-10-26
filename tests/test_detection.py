@@ -80,6 +80,8 @@ class DetectionTests(unittest.TestCase):
             self.assertEqual(len(loaded.samples), 1)
             detector.learn(image, box, "enemy", "Future Custom Brawler")
             self.assertEqual(EnemyDetector(root).detect(image)[0]["identity"], "Future Custom Brawler")
+            detector.learn(image, box, "enemy", "showdown BOX")
+            self.assertEqual(EnemyDetector(root).detect(image)[0]["identity"], "Showdown box")
 
     def test_cancel_review_does_not_teach_and_confirmation_logs_identity(self):
         with tempfile.TemporaryDirectory() as root:

@@ -60,6 +60,7 @@ class UiActionTests(unittest.TestCase):
             console.style_strength = Mock(get=Mock(return_value=1))
             console.style = Mock()
             console.style.choose.return_value = ACTIONS.index("attack")
+            console.style.action_controls.return_value = console.controls
             console.capture_frame = Mock(return_value=(console.image, []))
             console.one_step()
             operation, callback = console.work.call_args.args

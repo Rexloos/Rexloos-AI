@@ -1,6 +1,7 @@
 """Learn action preferences from a player's own USB touch demonstrations."""
 from collections import deque
 import json
+import math
 from pathlib import Path
 import queue
 import random
@@ -126,10 +127,8 @@ class TouchTracker:
         return results
 
 
-def gesture_action(gesture, controls, calibrated, size):
-    """Map observed gestures to the existing discrete action vocabulary."""
+def touch_control(origin, controls, calibrated, size):
     w, h = size
-    origin, end = gesture["start"], gesture["end"]
     candidates = []
     for control in ("move", "attack", "super", "gadget", "hypercharge"):
         if control in calibrated and control in controls:
@@ -139,7 +138,16 @@ def gesture_action(gesture, controls, calibrated, size):
                 candidates.append((distance, control))
     if not candidates:
         return None
-    control = min(candidates)[1]
+    return min(candidates)[1]
+
+
+def gesture_action(gesture, controls, calibrated, size):
+    """Map observed gestures to the existing discrete action vocabulary."""
+    w, h = size
+    origin, end = gesture["start"], gesture["end"]
+    control = touch_control(origin, controls, calibrated, size)
+    if control is None:
+        return None
     dx, dy = (end[0]-origin[0])*w, (end[1]-origin[1])*h
     if control == "move":
         # A held joystick remains displaced from its initial touch point.
@@ -166,6 +174,7 @@ class Playstyle:
         self.counts = data.get("counts", {})
         self.total = data.get("total", [0]*len(ACTIONS))
         self.applied_recordings = data.get("applied_recordings", [])
+        self.motion = data.get("motion", {})
         self.examples = sum(self.total)
         self.contexts = {}
         for state, values in self.counts.items():
@@ -181,13 +190,29 @@ class Playstyle:
             return json.dumps(name)
         return "null"
 
-    def observe(self, state, action):
+    def observe(self, state, action, gesture=None, size=None):
         index = ACTIONS.index(action)
         values = self.counts.setdefault(state, [0]*len(ACTIONS))
         values[index] += 1
         self.total[index] += 1
         self.contexts.setdefault(self.context(state), [0]*len(ACTIONS))[index] += 1
         self.examples += 1
+        if gesture and size and not gesture.get("idle") and action not in ("attack", "super", "gadget", "hypercharge"):
+            distance = math.hypot((gesture["end"][0]-gesture["start"][0])*size[0],
+                                  (gesture["end"][1]-gesture["start"][1])*size[1])/min(size)
+            stats = self.motion.setdefault(self.context(state), {}).setdefault(action, {"count": 0, "radius": 0, "duration": 0})
+            stats["count"] += 1
+            stats["radius"] += max(.02, min(.3, distance))
+            stats["duration"] += max(.05, min(.8, gesture["ended"]-gesture["started"]))
+
+    def action_controls(self, state, action, controls):
+        controls = dict(controls)
+        stats = self.motion.get(self.context(state), {}).get(action)
+        if stats and stats["count"]:
+            control = action.split("_", 1)[0] if "_" in action else "move"
+            controls[control+"_radius"] = stats["radius"]/stats["count"]
+            controls[control+"_duration"] = round(1000*stats["duration"]/stats["count"])
+        return controls
 
     def choose(self, state, available):
         local = self.counts.get(state)
@@ -201,7 +226,7 @@ class Playstyle:
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps({"version": 1, "player": self.player,
                                          "counts": self.counts, "total": self.total,
-                                         "applied_recordings": self.applied_recordings}))
+                                         "applied_recordings": self.applied_recordings, "motion": self.motion}))
         temporary.replace(self.path)
 
 
@@ -251,7 +276,7 @@ class PlayerSession:
                   "player": self.style.player, "rotation": self.rotation}
         with (self.style.folder / "demonstrations.jsonl").open("a") as stream:
             stream.write(json.dumps(record)+"\n")
-        self.style.observe(prior["state"], action)
+        self.style.observe(prior["state"], action, gesture, frames[-1]["image"].size)
         self.style.save()
         return True
 

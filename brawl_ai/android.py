@@ -153,4 +153,5 @@ class Device:
             radius = round(min(size) * controls.get(control + "_radius", controls["radius"]))
             end_x = max(0, min(width - 1, x + dx * radius))
             end_y = max(0, min(height - 1, y + dy * radius))
-            self.command("shell", "input", "swipe", str(x), str(y), str(end_x), str(end_y), "180")
+            duration = max(40, min(1000, int(controls.get(control+"_duration", 180))))
+            self.command("shell", "input", "swipe", str(x), str(y), str(end_x), str(end_y), str(duration))

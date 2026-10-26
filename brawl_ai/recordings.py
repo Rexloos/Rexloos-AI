@@ -17,6 +17,7 @@ from PIL import Image
 from .android import environment
 from .learning import ACTIONS, available_actions
 from .playstyle import Playstyle, TouchTracker, gesture_action, touch_devices
+from .replay import emit_task, render_replay
 
 
 def write_json(path, value):
@@ -176,10 +177,16 @@ class MatchRecording:
             error = str(caught)
         finally:
             self.metadata["stopped_host"] = self.stopped_at or time.monotonic()
+            emit_task(self.events, "video")
             self.events.put(("progress", {"label": "Saving game: finalizing video...", "current": 0, "total": 3}))
             for index, (process, interrupt) in enumerate(((video, True), (inputs, False)), 1):
                 try:
                     stop_process(process, interrupt)
+                    if index == 1:
+                        movie = self.folder/"game.mkv"
+                        if movie.exists() and movie.stat().st_size > 0 and self.metadata["video_origin_host"] is not None:
+                            emit_task(self.events, "video", 1, 1)
+                        emit_task(self.events, "input")
                     label = "Video saved. Saving your actions..." if index == 1 else "Video and actions saved. Finishing..."
                     self.events.put(("progress", {"label": label, "current": index, "total": 3}))
                 except Exception as caught:
@@ -206,6 +213,7 @@ class MatchRecording:
             if error:
                 self.events.put(("error", error))
             else:
+                emit_task(self.events, "input", 1, 1)
                 self.events.put(("progress", {"label": "Game saved. Preparing post-game analysis...", "current": 3, "total": 3}))
             self.events.put(("done", None))
 
@@ -295,13 +303,15 @@ def action_requests(metadata, gestures, timestamps, size, offset):
 
 
 class RecordingAnalysis:
-    def __init__(self, folder, style, state_builder, offset):
+    def __init__(self, folder, style, state_builder, offset, recognition_ready=True):
         self.folder, self.style, self.state_builder, self.offset = Path(folder), style, state_builder, offset
         self.recording = False
         self.events = queue.Queue()
         self.stop_event = threading.Event()
         self.success = False
         self.error = None
+        self.recognition_ready = recognition_ready
+        self.replay_path = None
 
     def start(self):
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -316,8 +326,13 @@ class RecordingAnalysis:
             token = self.folder.name
             if token in self.style.applied_recordings:
                 raise ValueError("This recording was already learned; it will not be counted twice.")
+            emit_task(self.events, "gestures")
             metadata, gestures = load_gestures(self.folder)
+            emit_task(self.events, "gestures", 1, 1)
+            emit_task(self.events, "index")
             timestamps, size = video_info(self.folder/"game.mkv", self.stop_event)
+            metadata["video_size"] = size
+            emit_task(self.events, "index", 1, 1)
             requests = action_requests(metadata, gestures, timestamps, size, self.offset)
             if not requests:
                 raise ValueError("No supported actions align with the video. Check rotation, controls and sync offset.")
@@ -329,6 +344,7 @@ class RecordingAnalysis:
             stage = self.folder/"analyses"/str(time.time_ns())
             stage.mkdir(parents=True)
             cache = {}
+            emit_task(self.events, "examples", 0, len(requests))
             with (stage/"examples.jsonl").open("w") as stream:
                 for index, request in enumerate(requests):
                     if self.stop_event.is_set():
@@ -337,24 +353,33 @@ class RecordingAnalysis:
                     stamp = request["frame_time"]
                     if stamp not in cache:
                         image = decode_frame(self.folder/"game.mkv", stamp, self.stop_event)
-                        state, _ = self.state_builder(image)
+                        state, detections = self.state_builder(image)
                         filename = f"frame-{index}.jpg"
                         image.thumbnail((960, 540))
                         image.save(stage/filename, quality=85)
-                        cache[stamp] = (state, filename)
-                    state, filename = cache[stamp]
-                    working.observe(state, request["action"])
-                    stream.write(json.dumps({**request, "state": state, "image": filename})+"\n")
+                        cache[stamp] = (state, filename, detections)
+                    state, filename, detections = cache[stamp]
+                    working.observe(state, request["action"], request["gesture"], size)
+                    stream.write(json.dumps({**request, "state": state, "image": filename, "detections": detections})+"\n")
+                    emit_task(self.events, "examples", index+1, len(requests))
                     self.events.put(("status", f"Post-game analysis: {index+1}/{len(requests)} actions"))
                     self.events.put(("progress", {"label": f"Analysis: {index+1}/{len(requests)} actions", "current": index+1, "total": len(requests)}))
             if self.stop_event.is_set():
                 self.events.put(("status", "Analysis cancelled. No player-model updates were applied."))
                 return
+            self.replay_path = render_replay(self.folder, stage, metadata,
+                timestamps[-1]+max(.02, min(.2, timestamps[-1]-timestamps[-2] if len(timestamps)>1 else .1)),
+                self.state_builder, self.offset, self.stop_event, self.events, self.recognition_ready)
+            if self.stop_event.is_set():
+                raise AnalysisCancelled()
             write_json(stage/"result.json", {"recording": token, "examples": len(requests),
-                                             "sync_offset": self.offset, "map": metadata.get("map")})
+                                             "sync_offset": self.offset, "map": metadata.get("map"),
+                                             "replay": "replay.mp4"})
             working.applied_recordings.append(token)
             self.events.put(("progress", {"label": "Saving learned playstyle..."}))
+            emit_task(self.events, "model")
             working.save()
+            emit_task(self.events, "model", 1, 1)
             self.style = working
             self.success = True
             self.events.put(("progress", {"label": f"Done: learned {len(requests)} actions", "current": 1, "total": 1}))

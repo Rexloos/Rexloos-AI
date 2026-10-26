@@ -3,6 +3,9 @@ import json
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageStat
+from .profiles import BRAWLERS, normalize
+
+ENTITY_NAMES = (*BRAWLERS, "NPC", "Showdown box")
 
 
 def overlap(first, second):
@@ -48,9 +51,8 @@ class EnemyDetector:
         if label not in ("enemy", "not_enemy"):
             return False
         if identity is not None:
-            from .profiles import BRAWLERS, normalize
             identity = normalize(identity)
-            identity = next((name for name in (*BRAWLERS, "NPC") if name.casefold() == identity.casefold()), identity)
+            identity = next((name for name in ENTITY_NAMES if name.casefold() == identity.casefold()), identity)
         x0, y0, x1, y1 = box
         if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
             raise ValueError("Annotation must be a normalized nonempty box.")

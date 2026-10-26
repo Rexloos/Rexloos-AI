@@ -81,6 +81,13 @@ class AbilityTests(unittest.TestCase):
         device.action("gadget_right", (1000, 500), controls)
         device.command.assert_called_with("shell", "input", "swipe", "990", "495", "999", "495", "180")
 
+    def test_learned_drag_duration_is_used_with_bounded_device_input(self):
+        device = Device.__new__(Device)
+        device.command = Mock()
+        controls = {"move": [.1, .8], "radius": .1, "move_radius": .2, "move_duration": 350}
+        device.action("right", (1000, 500), controls)
+        device.command.assert_called_once_with("shell", "input", "swipe", "100", "400", "200", "400", "350")
+
     def test_custom_reward_accumulates_and_rejects_nonfinite_values(self):
         console = Console.__new__(Console)
         console.status = Mock()

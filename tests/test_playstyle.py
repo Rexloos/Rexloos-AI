@@ -25,6 +25,20 @@ def gesture(start, end, started=2, touch_started=None):
 
 
 class PlaystyleTests(unittest.TestCase):
+    def test_motion_preferences_persist_and_only_adjust_imitated_controls(self):
+        with tempfile.TemporaryDirectory() as root:
+            model = Playstyle(root, "Player")
+            state = map_state("state", "One")
+            example = gesture((.1, .8), (.2, .8))
+            model.observe(state, "right", example, (1000, 500))
+            model.save()
+            loaded = Playstyle(root, "Player")
+            changed = loaded.action_controls(state, "right", CONTROLS)
+            self.assertAlmostEqual(changed["move_radius"], .2)
+            self.assertEqual(changed["move_duration"], 200)
+            self.assertNotIn("move_duration", CONTROLS)
+            self.assertEqual(loaded.action_controls(map_state("state", "Two"), "right", CONTROLS), CONTROLS)
+
     def test_discovers_honor_type_a_and_type_b_touch_capabilities(self):
         output = '''add device 1: /dev/input/event4
  name: "honor,ts_kit"

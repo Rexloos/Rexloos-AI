@@ -66,6 +66,8 @@ class RecordingFlowTests(unittest.TestCase):
             console = ui()
             session = RecordingAnalysis(Path(root)/"12345", Playstyle(root, "Player"), Mock(), 0)
             session.success = True
+            session.replay_path = Path(root)/"replay.mp4"
+            console.open_replay = Mock()
             session.events.put(("progress", {"label": "Analyzing", "current": 4, "total": 10}))
             session.events.put(("done", None))
             console.player_session = session
@@ -73,6 +75,7 @@ class RecordingFlowTests(unittest.TestCase):
             self.assertIn("40%", console.player_phase.set.call_args_list[0].args[0])
             self.assertIn("100%", console.player_phase.set.call_args.args[0])
             console.use_style.set.assert_called_once_with(True)
+            console.open_replay.assert_called_once_with(session.replay_path)
             self.assertIsNone(console.player_session)
 
     def test_failed_analysis_is_not_presented_as_learning_success(self):

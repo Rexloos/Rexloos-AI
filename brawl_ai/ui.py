@@ -11,14 +11,15 @@ from tkinter import messagebox, simpledialog, ttk
 from PIL import ImageTk
 from .android import Device, cache_root
 from .learning import ACTIONS, Learner, available_actions
-from .profiles import BRAWLERS, Profile, choices
+from .profiles import Profile, choices
 from .curriculum import recommend
-from .detection import EnemyDetector, enemy_state
+from .detection import ENTITY_NAMES, EnemyDetector, enemy_state
 from .maps import MapRecognizer, map_state
 from .capture import CaptureLoop, capture_interval
 from .playstyle import Playstyle, PlayerSession
 from .recordings import (MatchRecording, RecordingAnalysis, video_tools, load_gestures,
                          video_info, action_requests, decode_frame)
+from .replay import TASKS, ReplayPlayer
 
 
 class Console:
@@ -139,6 +140,10 @@ class Console:
         self.player_progress = tk.DoubleVar(value=0)
         self.player_bar = self.player_dialog = None
         self.auto_analyze = False
+        self.player_tasks = {key: {"label": label, "value": tk.DoubleVar(value=0),
+                                  "text": tk.StringVar(value="Waiting"), "state": "waiting"}
+                             for key, label in TASKS}
+        self.task_bars = {}
         self.style = Playstyle(self.folder, self.player_name.get())
         self.style_status = tk.StringVar(value=f"Player style: {self.style.examples} examples | imitation off")
         style_bar = tk.Frame(self.root)
@@ -178,7 +183,7 @@ class Console:
         tk.Button(detection_bar, text="Cancel selection (Esc)", command=self.cancel_box_edit).pack(side="left")
         self.detection_status = tk.StringVar(value="Enemy detector: label examples to begin.")
         tk.Label(detection_bar, textvariable=self.detection_status).pack(side="left")
-        tk.Label(self.root, text="Click a detected box to confirm or correct its identity. Label enemy teaches a new character or NPC.").pack()
+        tk.Label(self.root, text="Click a detected box to confirm or correct it. Label enemy teaches brawlers, NPCs and Showdown boxes.").pack()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(100, self.poll)
         self.load_gadget_mode()
@@ -210,6 +215,15 @@ class Console:
         tk.Label(window, textvariable=self.player_phase, wraplength=560).pack(padx=12, pady=8)
         self.player_bar = ttk.Progressbar(window, variable=self.player_progress, maximum=100, length=500)
         self.player_bar.pack(padx=12, pady=6)
+        task_list = tk.Frame(window)
+        task_list.pack(padx=12, pady=8)
+        self.task_bars = {}
+        for index, (key, item) in enumerate(self.player_tasks.items()):
+            tk.Label(task_list, text=item["label"], anchor="w").grid(row=index, column=0, sticky="w", padx=4)
+            bar = ttk.Progressbar(task_list, variable=item["value"], maximum=100, length=180)
+            bar.grid(row=index, column=1, padx=4, pady=2)
+            tk.Label(task_list, textvariable=item["text"], width=12).grid(row=index, column=2)
+            self.task_bars[key] = bar
         tk.Label(window, textvariable=self.style_status, wraplength=560).pack(padx=12, pady=8)
         tk.Checkbutton(window, text="Use learned playstyle for AI decisions", variable=self.use_style).pack()
         advanced = tk.Frame(window)
@@ -253,6 +267,7 @@ class Console:
         tk.Spinbox(row, textvariable=self.review_action, from_=1, to=100000, width=6).pack(side="left")
         tk.Button(row, text="Preview recorded action", command=self.preview_game).pack(side="left")
         tk.Button(advanced, text="Analyze selected saved game", command=self.analyze_game).pack(pady=6)
+        tk.Button(advanced, text="Watch analyzed game", command=self.watch_saved_game).pack(pady=4)
         tk.Scale(advanced, variable=self.style_strength, from_=0, to=1, resolution=.05,
                  orient="horizontal", label="Imitation influence (0 = reward policy, 1 = player preferences)", length=470).pack()
         tk.Label(advanced, wraplength=560, text="Names, controls and map come from the active profile. If touch mapping or timing needs correction, use the optional preview and offset settings. Recording does not train the model; analysis does.").pack(padx=12, pady=10)
@@ -271,6 +286,64 @@ class Console:
             button = getattr(self, name, None)
             if button is not None and button.winfo_exists():
                 button.configure(state="normal" if enabled else "disabled")
+
+    def reset_player_tasks(self, saved=False):
+        for key in getattr(self, "player_tasks", {}):
+            item = self.player_tasks[key]
+            item["state"] = "waiting"
+            item["value"].set(0)
+            item["text"].set("Waiting")
+            bar = self.task_bars.get(key)
+            if bar is not None and bar.winfo_exists():
+                bar.stop()
+                bar.configure(mode="determinate")
+        if saved:
+            self.set_player_task("video", 1, 1)
+            self.set_player_task("input", 1, 1)
+
+    def set_player_task(self, task, current=None, total=None, label=None):
+        if task not in getattr(self, "player_tasks", {}):
+            return
+        item = self.player_tasks[task]
+        item["state"] = "done" if total and current >= total else "running"
+        item["text"].set(f"{100*current/total:.0f}%" if total else "Working...")
+        if total:
+            item["value"].set(100*current/total)
+        bar = self.task_bars.get(task)
+        if bar is not None and bar.winfo_exists():
+            bar.stop()
+            bar.configure(mode="determinate" if total else "indeterminate")
+            if not total:
+                bar.start(50)
+
+    def stop_player_tasks(self, failed=False):
+        for key, item in getattr(self, "player_tasks", {}).items():
+            if item["state"] == "running":
+                item["state"] = "failed" if failed else "cancelled"
+                item["text"].set("Failed" if failed else "Cancelled")
+                bar = self.task_bars.get(key)
+                if bar is not None and bar.winfo_exists():
+                    bar.stop()
+
+    def open_replay(self, path):
+        if path is None:
+            return
+        try:
+            self.replay_player = ReplayPlayer(self.root, path)
+        except (OSError, ValueError, tk.TclError) as error:
+            self.status.set(f"Learning was saved, but the replay could not open: {error}")
+
+    def watch_saved_game(self):
+        if self.player_guard():
+            return
+        try:
+            path, _, _ = self.selected_game()
+            candidates = sorted((path/"analyses").glob("*/replay.json"))
+            if not candidates:
+                raise ValueError("No analyzed replay is available for this game yet.")
+            self.open_replay(candidates[-1].with_suffix(".mp4"))
+        except (OSError, ValueError) as error:
+            self.status.set(str(error))
 
     def set_player_progress(self, label, current=None, total=None):
         if not hasattr(self, "player_phase"):
@@ -334,6 +407,7 @@ class Console:
             detections = detector.detect(image)
             return map_state(enemy_state(image, detections, detector.ready), active_map), detections
         if recording:
+            self.reset_player_tasks()
             self.player_session = MatchRecording(self.device, style, self.controls, self.calibrated,
                                                  rotation, fps, {**self.profile.record(), "map": active_map},
                                                  auto_rotation=self.touch_auto.get())
@@ -415,7 +489,8 @@ class Console:
         def state_builder(image):
             detections = detector.detect(image)
             return map_state(enemy_state(image, detections, detector.ready), metadata.get("map")), detections
-        self.player_session = RecordingAnalysis(path, style, state_builder, offset)
+        self.reset_player_tasks(saved=True)
+        self.player_session = RecordingAnalysis(path, style, state_builder, offset, recognition_ready=detector.ready)
         self.player_session.start()
         self.set_player_progress("Analysis: reading saved video and actions...")
         self.style_status.set("Analyzing the saved game; model updates apply only after successful completion...")
@@ -443,6 +518,9 @@ class Console:
                     self.status.set(value)
                     self.style_status.set("Player observation failed; see the console status.")
                     self.set_player_progress(f"Failed: {value}", 0, 1)
+                    self.stop_player_tasks(failed=True)
+                elif kind == "task":
+                    self.set_player_task(**value)
                 elif kind == "progress":
                     self.set_player_progress(**{key: value[key] for key in ("label", "current", "total") if key in value})
                 elif kind == "status":
@@ -462,9 +540,11 @@ class Console:
                             self.use_style.set(True)
                             self.style_status.set(f"Learning complete | {self.style.examples} player examples | imitation enabled")
                             self.set_player_progress("Done. Player playstyle saved and ready to use.", 1, 1)
+                            self.open_replay(session.replay_path)
                         elif session.error:
                             self.set_player_progress(f"Analysis failed: {session.error}", 0, 1)
                         else:
+                            self.stop_player_tasks()
                             self.set_player_progress("Analysis stopped. Previous learning was preserved.", 0, 1)
                     elif not isinstance(session, RecordingAnalysis):
                         self.style_status.set(f"Loaded {self.style.player}: {self.style.examples} examples | observation stopped")
@@ -886,12 +966,12 @@ class Console:
 
     def identity_dialog(self, suggestion="Unknown", review=False):
         dialog = tk.Toplevel(self.root)
-        dialog.title("Confirm character identity")
+        dialog.title("Confirm entity identity")
         dialog.transient(self.root)
         result = []
-        tk.Label(dialog, text=f"Closest learned identity: {suggestion}\nConfirm it or select the actual character.").pack(padx=16, pady=10)
+        tk.Label(dialog, text=f"Closest learned identity: {suggestion}\nConfirm it or select the actual entity.").pack(padx=16, pady=10)
         value = tk.StringVar(value="" if suggestion == "Unknown" else suggestion)
-        names = sorted(set(BRAWLERS) | {"NPC"} | {
+        names = sorted(set(ENTITY_NAMES) | {
             item["identity"] for item in self.detector.samples if item.get("identity")})
         selector = ttk.Combobox(dialog, textvariable=value, values=names, width=32)
         selector.pack(padx=16, pady=8)
@@ -1048,14 +1128,16 @@ class Console:
         self.finish()
         state = map_state(enemy_state(self.image, self.detections, self.detector.ready), self.active_map)
         action = self.agent.choose(state, available_actions(self.controls, self.calibrated))
+        action_controls = self.controls
         if self.use_style.get() and random.random() < self.style_strength.get():
             imitated = self.style.choose(state, available_actions(self.controls, self.calibrated))
             if imitated is not None:
                 action = imitated
+                action_controls = self.style.action_controls(state, ACTIONS[action], self.controls)
         name = ACTIONS[action]
         self.status.set(f"Executing AI action: {name}. Waiting for the device and updated detections...")
         def execute():
-            self.device.action(ACTIONS[action], self.image.size, self.controls)
+            self.device.action(ACTIONS[action], self.image.size, action_controls)
             time.sleep(0.15)
             return self.capture_frame()
         def complete(result):
