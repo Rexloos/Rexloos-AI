@@ -22,6 +22,7 @@ from .recordings import (MatchRecording, RecordingAnalysis, video_tools, load_ge
 from .replay import TASKS, ReplayPlayer
 from .hud import CONTROLS, STATES, HudDetector, hud_label
 from .player import PlayerDetector, merge_player
+from .activity import ActivityLog
 
 
 class Console:
@@ -193,9 +194,56 @@ class Console:
         self.detection_status = tk.StringVar(value="Enemy detector: label examples to begin.")
         tk.Label(detection_bar, textvariable=self.detection_status).pack(side="left")
         tk.Label(self.root, text="Click a detected box to confirm or correct it. Label enemy teaches brawlers, NPCs and Showdown boxes.").pack()
+        self.activity = ActivityLog(self.training_root/"logs")
+        self.activity_window = self.activity_text = None
+        self.activity_summary = tk.StringVar(value="Activity logging started")
+        activity_bar = tk.Frame(self.root)
+        activity_bar.pack(fill="x")
+        tk.Button(activity_bar, text="Activity log", command=self.open_activity_log).pack(side="left")
+        tk.Label(activity_bar, textvariable=self.activity_summary, anchor="w", wraplength=850).pack(side="left")
+        for name in ("status", "style_status", "player_phase", "capture_status", "detection_status", "profile_status", "reward_status", "map_status"):
+            variable = getattr(self, name)
+            variable.trace_add("write", lambda *args, name=name, variable=variable:
+                               self.activity.add(name, variable.get(), 2 if name in ("player_phase", "detection_status", "capture_status") else 0))
+        self.activity.add("session", f"Console started | {self.profile.brawler} / {self.profile.mode} | log: {self.activity.path}")
+        self.root.after(1000, self.activity_tick)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(100, self.poll)
         self.load_gadget_mode()
+
+    def open_activity_log(self):
+        if self.activity_window is not None and self.activity_window.winfo_exists():
+            self.activity_window.lift()
+            return
+        self.activity_window = tk.Toplevel(self.root)
+        self.activity_window.title("Brawl AI - Activity log")
+        tk.Label(self.activity_window, text=f"Saved to: {self.activity.path}", wraplength=850).pack()
+        from tkinter.scrolledtext import ScrolledText
+        self.activity_text = ScrolledText(self.activity_window, width=110, height=24, state="disabled", wrap="word")
+        self.activity_text.pack(fill="both", expand=True)
+        self.render_activity()
+
+    def render_activity(self):
+        if self.activity_text is not None and self.activity_text.winfo_exists():
+            at_bottom = self.activity_text.yview()[1] >= .99
+            position = self.activity_text.yview()[0]
+            self.activity_text.configure(state="normal")
+            self.activity_text.delete("1.0", "end")
+            self.activity_text.insert("end", "\n".join(self.activity.snapshot()))
+            self.activity_text.configure(state="disabled")
+            self.activity_text.yview_moveto(1 if at_bottom else position)
+
+    def activity_tick(self):
+        session = self.player_session
+        task = ("recording" if session.recording else "analysis/input preview") if session else "none"
+        elapsed = time.monotonic()-getattr(self, "work_started", time.monotonic()) if self.busy else 0
+        message = (f"Profile: {self.profile.brawler}/{self.profile.mode} | AI: {'running' if self.running else 'paused'} | "
+                   f"Device: {self.work_kind or 'idle'} ({elapsed:.0f}s) | Player task: {task} | "
+                   f"Capture: {self.capture_blocked() or 'ready'}")
+        self.activity.add("heartbeat", message, interval=15, repeat=True)
+        self.activity_summary.set(self.activity.failure or message)
+        self.render_activity()
+        self.root.after(1000, self.activity_tick)
 
     def update_profile_status(self):
         self.profile_status.set(f"Active: {self.profile.brawler} / {self.profile.mode} | Learned transitions: {self.agent.steps}")
@@ -801,16 +849,26 @@ class Console:
             return
         self.busy = True
         self.work_kind = kind
+        self.work_started = time.monotonic()
+        activity = getattr(self, "activity", None)
+        if activity is not None:
+            activity.add("operation", f"Started {kind}", interval=2 if kind == "preview" else 0)
         def worker():
             try:
                 self.events.put((callback, operation(), None))
             except Exception as error:
+                if activity is not None:
+                    activity.add("error", traceback.format_exc())
                 self.events.put((callback, None, str(error)))
         threading.Thread(target=worker, daemon=True).start()
 
     def poll(self):
         try:
             callback, result, error = self.events.get_nowait()
+            activity = getattr(self, "activity", None)
+            if activity is not None:
+                activity.add("operation_done", f"{self.work_kind}: {'failed' if error else 'completed'} in {time.monotonic()-self.work_started:.2f}s",
+                             interval=2 if self.work_kind == "preview" else 0)
             self.busy = False
             self.work_kind = None
             if error:
@@ -837,6 +895,8 @@ class Console:
         self.stop_capture()
         self.cancel_box_edit()
         traceback.print_exception(error_type, error, trace)
+        if getattr(self, "activity", None) is not None:
+            self.activity.add("error", "".join(traceback.format_exception(error_type, error, trace)))
         self.status.set(f"Console error: {error}. Details are in the terminal; try Capture again.")
 
     def capture_frame(self):
@@ -1391,6 +1451,9 @@ class Console:
             return
         self.finish()
         self.agent.save()
+        if getattr(self, "activity", None) is not None:
+            self.activity.add("session", "Console closed; pending learning and policy saved.")
+            self.activity.close()
         self.root.destroy()
 
     def run(self):

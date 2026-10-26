@@ -167,6 +167,12 @@ Video is encoded on the phone and saved continuously as `game.mkv` using [scrcpy
 
 Timing is estimated automatically from device/host input timestamps and the video recorder's start log. This is not guaranteed to be frame-exact. If results look misaligned, advanced **Preview recorded action** and **Video/input offset** let you inspect and adjust timing before manually analyzing an unlearned saved recording. Positive offsets select a later point in the video for the gesture. Previously applied recordings remain protected against double counting. Raw video remains available until learning is successfully saved; afterward use the annotated replay.
 
+### Activity log
+
+The main console continuously shows the active profile, AI running/paused state, device operation and its elapsed time, player recording/analysis activity, and capture blocking reason. **Activity log** opens a scrolling history with local timestamps. Status changes, analysis progress, model-save messages, rewards, map/profile changes, operation completion times and errors are logged automatically. Repeated progress is throttled; a heartbeat is recorded every 15 seconds, including while idle. A heartbeat reports the UI's known state, not proof that a device or external media process is responsive. If Tk itself freezes, its heartbeat also stops.
+
+Logs survive restarts in `training/logs/activity.log` inside the local cache. Rotation keeps the active file and three backups of approximately 2 MiB each (about 8 MiB total). The viewer retains the latest 500 entries from the current session; older entries remain in the rotated files until overwritten. If file logging fails, the current session history remains available in the viewer. Logs can contain profile/map names, local paths and error details. Automated tests verify rotation, bounded history, throttling, repeated heartbeats and file-failure handling; the desktop viewer has not been manually verified.
+
 ### Automatic storage cleanup
 
 Cleanup runs before a new phone recording and after successful post-game learning, for the current player/brawler/mode combination. After the learned model is saved and a completed, nonempty replay exists, it removes that game's original `game.mkv`, raw `input.jsonl` and `recorder.log`. The annotated replay replaces the raw video for watching the game. Failed or cancelled analysis removes its own partial export folder but preserves the original recording for retry. Interrupted exports left by a process crash are not automatically removed.
