@@ -124,6 +124,12 @@ class RecordingTests(unittest.TestCase):
             self.assertEqual(len(replay_stamps), 40)
             self.assertTrue((analysis.replay_path.parent/"finger-actions.json").exists())
             self.assertTrue((analysis.replay_path.parent/"character-proposals.json").exists())
+            review = json.loads((analysis.replay_path.parent/"review.json").read_text())
+            self.assertEqual([frame["time"] for frame in review["frames"]], [0, 1])
+            for frame in review["frames"]:
+                self.assertTrue((analysis.replay_path.parent/frame["image"]).exists())
+                self.assertTrue(all(item["decision"] == "pending" for item in frame["items"]))
+            self.assertFalse((Path(root)/"profile"/"enemy-detector.json").exists())
             again = RecordingAnalysis(folder, learned, Mock(), 0)
             again.run()
             self.assertEqual(Playstyle(Path(root)/"profile", "Player").examples, 2)

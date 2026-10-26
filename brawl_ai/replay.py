@@ -122,6 +122,7 @@ def read_exact(stream, count):
 def render_replay(folder, stage, metadata, duration, state_builder, offset, stop_event, events, recognition_ready=True):
     # Imports are delayed to keep media helpers independent of replay/UI construction.
     from .recordings import AnalysisCancelled, write_json
+    from .review import review_candidates
     width, height = metadata["video_size"]
     ratio = min(1, 960/width, 540/height)
     width, height = max(2, int(width*ratio)//2*2), max(2, int(height*ratio)//2*2)
@@ -136,6 +137,8 @@ def render_replay(folder, stage, metadata, duration, state_builder, offset, stop
     next_detection = 0
     detections = []
     proposals = []
+    review_frames = []
+    (stage/"review").mkdir()
     emit_task(events, "replay", 0, expected)
     with (stage/"replay-media.log").open("wb") as log:
         try:
@@ -156,6 +159,10 @@ def render_replay(folder, stage, metadata, duration, state_builder, offset, stop
                 if stamp >= next_detection:
                     _, detections = state_builder(image)
                     proposals.append({"time": stamp, "detections": detections})
+                    filename = f"review/frame-{len(review_frames):06d}.png"
+                    image.save(stage/filename)
+                    review_frames.append({"time": stamp, "image": filename,
+                                          "items": review_candidates(detections, metadata, image.size)})
                     next_detection = stamp+1
                 annotated = draw_overlay(image, stamp, timeline, times, detections, recognition_ready)
                 encode.stdin.write(annotated.tobytes())
@@ -180,6 +187,8 @@ def render_replay(folder, stage, metadata, duration, state_builder, offset, stop
     write_json(stage/"character-proposals.json", [{"time": sample["time"], "detections": [item for item in sample["detections"] if item.get("kind") not in ("control", "player")]} for sample in proposals])
     write_json(stage/"control-proposals.json", [{"time": sample["time"], "detections": [item for item in sample["detections"] if item.get("kind") == "control"]} for sample in proposals])
     write_json(stage/"player-proposals.json", [{"time": sample["time"], "detections": [item for item in sample["detections"] if item.get("kind") == "player"]} for sample in proposals])
+    write_json(stage/"review.json", {"version": 1, "brawler": metadata.get("brawler", "Unknown"),
+                                     "map": metadata.get("map"), "frames": review_frames})
     emit_task(events, "replay", expected, expected)
     return output
 
@@ -187,7 +196,7 @@ def render_replay(folder, stage, metadata, duration, state_builder, offset, stop
 class ReplayPlayer:
     """Small Tk player; decoding stays off the UI thread and the frame queue is bounded."""
 
-    def __init__(self, root, path):
+    def __init__(self, root, path, review=None):
         import tkinter as tk
         self.path = Path(path)
         info = json.loads(self.path.with_suffix(".json").read_text())
@@ -203,6 +212,8 @@ class ReplayPlayer:
         self.position = tk.DoubleVar(value=0)
         self.caption = tk.StringVar()
         tk.Button(controls, text="Play / pause", command=self.toggle).pack(side="left")
+        if review is not None:
+            tk.Button(controls, text="Review mapped objects...", command=review).pack(side="left")
         tk.Label(controls, textvariable=self.caption).pack(side="left")
         slider = tk.Scale(self.window, from_=0, to=self.duration, resolution=.1,
                           variable=self.position, orient="horizontal", length=self.width)

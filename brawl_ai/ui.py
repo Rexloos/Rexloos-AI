@@ -1,6 +1,7 @@
 """Desktop teaching console. Device work stays off Tk's UI thread."""
 import json
 import math
+from pathlib import Path
 import random
 import traceback
 import queue
@@ -24,6 +25,7 @@ from .hud import CONTROLS, STATES, HudDetector, hud_label
 from .player import PlayerDetector, merge_player
 from .activity import ActivityLog
 from .dashboard import build_dashboard
+from .review import GameReview, ReviewStore
 
 
 class Console:
@@ -204,6 +206,7 @@ class Console:
         tk.Button(row, text="Preview recorded action", command=self.preview_game).pack(side="left")
         tk.Button(advanced, text="Analyze selected saved game", command=self.analyze_game).pack(pady=6)
         tk.Button(advanced, text="Watch analyzed game", command=self.watch_saved_game).pack(pady=4)
+        tk.Button(advanced, text="Review mapped objects", command=self.review_saved_game).pack(pady=4)
         tk.Scale(advanced, variable=self.style_strength, from_=0, to=1, resolution=.05,
                  orient="horizontal", label="Imitation influence (0 = reward policy, 1 = player preferences)", length=470).pack()
         tk.Label(advanced, wraplength=560, text="Names, controls and map come from the active profile. If touch mapping or timing needs correction, use the optional preview and offset settings. Recording does not train the model; analysis does.").pack(padx=12, pady=10)
@@ -264,10 +267,55 @@ class Console:
     def open_replay(self, path):
         if path is None:
             return
+        path = Path(path)
         try:
-            self.replay_player = ReplayPlayer(self.root, path)
+            review = (lambda: self.open_game_review(path)) if (path.parent/"review.json").exists() else None
+            self.replay_player = ReplayPlayer(self.root, path, review=review)
         except (OSError, ValueError, tk.TclError) as error:
             self.status.set(f"Learning was saved, but the replay could not open: {error}")
+
+    def open_game_review(self, path):
+        if path is None:
+            return
+        if self.busy or self.player_session is not None:
+            self.status.set("Wait for the current operation before reviewing the recorded game.")
+            return
+        self.pause()
+        self.stop_capture()
+        path = Path(path)
+        if not (path.parent/"review.json").exists():
+            self.open_replay(path)
+            self.status.set("This older analysis has no editable review frames. New analyses create them automatically.")
+            return
+        try:
+            previous = getattr(self, "game_review", None)
+            if previous is not None and previous.window.winfo_exists():
+                previous.window.destroy()
+            # Bind to the recording's profile even if the user later switches.
+            folder = self.style.folder.parent.parent
+            store = ReviewStore(path.parent, folder)
+            def changed():
+                if self.folder.resolve() == folder.resolve():
+                    self.detector = EnemyDetector(folder)
+                    self.hud_detector = HudDetector(folder)
+                    self.self_detector = PlayerDetector(folder, self.profile.brawler)
+                self.activity.add("game_review", f"Human correction saved for {store.data['brawler']} | {path.parent}", repeat=True)
+            self.game_review = GameReview(self.root, store, changed, lambda: self.open_replay(path))
+        except (OSError, ValueError, KeyError, tk.TclError) as error:
+            self.status.set(f"Could not open game review: {error}")
+
+    def review_saved_game(self):
+        if self.player_guard() or self.busy:
+            return
+        try:
+            path, _, _ = self.selected_game()
+            candidates = sorted((path/"analyses").glob("*/review.json"))
+            if not candidates:
+                raise ValueError("This game has no editable review. New analyses create review frames automatically.")
+            self.pause()
+            self.open_game_review(candidates[-1].with_name("replay.mp4"))
+        except (OSError, ValueError) as error:
+            self.status.set(str(error))
 
     def watch_saved_game(self):
         if self.player_guard():
@@ -488,8 +536,8 @@ class Console:
                         if session.success:
                             self.use_style.set(True)
                             self.style_status.set(f"Learning complete | {self.style.examples} player examples | imitation enabled")
-                            self.set_player_progress("Done. Player playstyle saved and ready to use.", 1, 1)
-                            self.open_replay(session.replay_path)
+                            self.set_player_progress("Done. Review and correct the mapped objects.", 1, 1)
+                            self.open_game_review(session.replay_path)
                         elif session.error:
                             self.set_player_progress(f"Analysis failed: {session.error}", 0, 1)
                         else:
