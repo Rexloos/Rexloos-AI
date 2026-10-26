@@ -53,6 +53,32 @@ def recording_fixture(root, encode=True):
 
 
 class RecordingTests(unittest.TestCase):
+    def test_delayed_startup_log_recovers_approximate_timing(self):
+        with tempfile.TemporaryDirectory() as root:
+            _, folder, _ = recording_fixture(root, False)
+            for origin in (None, 12, 11.999, 50):
+                metadata, gestures = load_gestures(folder)
+                metadata["video_origin_host"] = origin
+                requests = action_requests(metadata, gestures, [i/10 for i in range(20)], (160, 90), 0)
+                self.assertEqual(metadata["video_origin_host"], 10)
+                self.assertEqual(len(requests), 2)
+                self.assertIn("approximate", metadata["timing_warning"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg tools unavailable")
+    def test_video_without_input_still_creates_review_without_training(self):
+        with tempfile.TemporaryDirectory() as root:
+            style, folder, _ = recording_fixture(root)
+            (folder/"input.jsonl").unlink()
+            analysis = RecordingAnalysis(folder, style, lambda image: (state_key(image), []), 0)
+            analysis.run()
+            self.assertTrue(analysis.success, analysis.error)
+            self.assertTrue(analysis.review_only)
+            self.assertEqual(analysis.learned_examples, 0)
+            self.assertTrue((analysis.replay_path.parent/"review.json").exists())
+            self.assertTrue((folder/"game.mkv").exists())
+            self.assertFalse(style.path.exists())
+            self.assertNotIn(folder.name, style.applied_recordings)
+
     def test_selects_only_preceding_frames_and_rejects_invalid_offsets(self):
         self.assertEqual(preceding_frame([0, .1, .2, .3], .26), .2)
         self.assertIsNone(preceding_frame([0, .1], 0))
@@ -68,7 +94,7 @@ class RecordingTests(unittest.TestCase):
                     action_requests(metadata, gestures, [0, 1], (160, 90), offset)
 
     @patch("brawl_ai.recordings.video_tools")
-    @patch("brawl_ai.recordings.shutil.which", return_value="scrcpy")
+    @patch("brawl_ai.recordings.shutil.which", side_effect=lambda name: name)
     @patch("brawl_ai.recordings.subprocess.Popen")
     def test_video_capture_records_without_screenshots_detection_or_model_updates(self, popen, which, tools):
         with tempfile.TemporaryDirectory() as root:
@@ -81,13 +107,17 @@ class RecordingTests(unittest.TestCase):
             for process in (inputs, video):
                 process.poll.return_value = None
             session = MatchRecording(device, style, {}, set(), 90, 30, {})
+            class VideoOutput(io.StringIO):
+                def __iter__(self):
+                    yield "INFO: Recording started to mkv file: game.mkv\n"
+                    session.stop()
+            video.stdout = VideoOutput()
             def create_process(*args, **kwargs):
-                if args[0][0] == "scrcpy":
+                if "scrcpy" in args[0]:
                     (session.folder/"game.mkv").write_bytes(b"test-video")
                     return video
                 return inputs
             popen.side_effect = create_process
-            session.stop()
             session.run()
             device.screenshot.assert_not_called()
             device.action.assert_not_called()
@@ -96,6 +126,7 @@ class RecordingTests(unittest.TestCase):
             video.send_signal.assert_called_once_with(signal.SIGINT)
             self.assertEqual(json.loads((session.folder/"session.json").read_text())["status"], "ready")
             args = popen.call_args_list[1].args[0]
+            self.assertEqual(args[:4], ["stdbuf", "-oL", "-eL", "scrcpy"])
             self.assertIn("--no-control", args)
             self.assertIn("--no-audio", args)
             self.assertNotIn("--no-window", args)

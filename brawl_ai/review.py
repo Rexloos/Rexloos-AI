@@ -176,6 +176,8 @@ class GameReview:
         frame = self.store.data["frames"][self.index]
         pending = sum(item["decision"] == "pending" for sample in self.store.data["frames"] for item in sample["items"])
         self.status.set(f"Sample {self.index+1}/{len(self.store.data['frames'])} | {frame['time']:.1f}s | {pending} pending proposals. Missing entities need human labels.")
+        if self.store.data.get("timing_warning"):
+            self.status.set(self.status.get()+" "+self.store.data["timing_warning"])
 
     def draw(self):
         self.canvas.delete("all")

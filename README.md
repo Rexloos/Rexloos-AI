@@ -177,6 +177,10 @@ Video is encoded on the phone and saved continuously as `game.mkv` using [scrcpy
 
 Timing is estimated automatically from device/host input timestamps and the video recorder's start log. This is not guaranteed to be frame-exact. If results look misaligned, advanced **Preview recorded action** and **Video/input offset** let you inspect and adjust timing before manually analyzing an unlearned saved recording. Positive offsets select a later point in the video for the gesture. Previously applied recordings remain protected against double counting. Raw video remains available until learning is successfully saved; afterward use the annotated replay.
 
+Recording launches scrcpy with line-buffered output when `stdbuf` is available so startup messages arrive while recording, rather than only on exit. If no timely startup message arrives, observed video-file data supplies an approximate origin. A startup line arriving after Stop cannot set the origin. For older recordings with a missing/impossible origin or a video timeline extending materially beyond the host stop time, analysis estimates the origin from the host stop time minus video duration, displays a timing warning in the log and object review, and preserves the original video/input even during later cleanup. This repair is approximate; check finger/action alignment in replay. Successfully applied recordings still cannot be learned twice.
+
+If a finalized video has no input or no supported aligned actions, analysis still renders its replay and object review. This review-only result does not update or enable the player model, mark the recording as learned, or delete original media. You can review/correct visual objects and retry action analysis after correcting input mapping or timing. This differs from learning success; the UI explicitly reports that no actions were learned.
+
 ### Activity log
 
 Activity entries also print immediately to standard output in the terminal that launched the application, with the same timestamps and throttling as the viewer. Console output continues if file logging becomes unavailable.

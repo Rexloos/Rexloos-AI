@@ -10,6 +10,15 @@ from brawl_ai.storage import cleanup_recordings
 
 
 class StorageTests(unittest.TestCase):
+    def test_estimated_timing_preserves_originals_even_after_later_cleanup(self):
+        with tempfile.TemporaryDirectory() as root:
+            stage = self.fixture(root, "estimated")
+            (stage/"result.json").write_text(json.dumps({"recording": "estimated", "timing_warning": "Delayed startup log"}))
+            style = SimpleNamespace(folder=Path(root), applied_recordings=["estimated"])
+            cleanup_recordings(style)
+            self.assertTrue((stage.parent.parent/"game.mkv").exists())
+            self.assertTrue((stage.parent.parent/"input.jsonl").exists())
+
     def fixture(self, root, token, learned=True, complete=True):
         folder = Path(root)/"recordings"/token
         stage = folder/"analyses"/"1"

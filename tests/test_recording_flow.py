@@ -21,6 +21,20 @@ def ui():
 
 
 class RecordingFlowTests(unittest.TestCase):
+    def test_review_only_analysis_opens_editor_without_enabling_imitation(self):
+        with tempfile.TemporaryDirectory() as root:
+            console = ui()
+            session = RecordingAnalysis(Path(root)/"12345", Playstyle(root, "Player"), Mock(), 0)
+            session.success = session.review_only = True
+            session.replay_path = Path(root)/"replay.mp4"
+            console.open_game_review = Mock()
+            session.events.put(("done", None))
+            console.player_session = session
+            console.poll_player()
+            console.use_style.set.assert_not_called()
+            console.open_game_review.assert_called_once_with(session.replay_path)
+            self.assertIn("No aligned actions", console.style_status.set.call_args.args[0])
+
     def test_saved_recording_starts_analysis_without_another_user_action(self):
         with tempfile.TemporaryDirectory() as root:
             console = ui()

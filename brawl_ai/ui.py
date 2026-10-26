@@ -534,8 +534,11 @@ class Console:
                             self.set_player_progress("Game saved. Analysis can be started from saved games.", 1, 1)
                     elif isinstance(session, RecordingAnalysis):
                         if session.success:
-                            self.use_style.set(True)
-                            self.style_status.set(f"Learning complete | {self.style.examples} player examples | imitation enabled")
+                            if session.review_only:
+                                self.style_status.set("Object review ready | No aligned actions learned | Original recording kept for retry")
+                            else:
+                                self.use_style.set(True)
+                                self.style_status.set(f"Learning complete | {self.style.examples} player examples | imitation enabled")
                             self.set_player_progress("Done. Review and correct the mapped objects.", 1, 1)
                             self.open_game_review(session.replay_path)
                         elif session.error:

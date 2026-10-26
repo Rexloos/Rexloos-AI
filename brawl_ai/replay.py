@@ -26,6 +26,8 @@ def emit_task(events, task, current=None, total=None, label=None):
 
 
 def touch_timeline(folder, metadata, offset):
+    if not (folder/"input.jsonl").exists():
+        return []
     rows = [json.loads(line) for line in (folder/"input.jsonl").read_text().splitlines() if line.strip()]
     rows = [row for row in rows if row["device"] is not None and row["host"] <= metadata["stopped_host"]]
     if not rows:
@@ -188,7 +190,8 @@ def render_replay(folder, stage, metadata, duration, state_builder, offset, stop
     write_json(stage/"control-proposals.json", [{"time": sample["time"], "detections": [item for item in sample["detections"] if item.get("kind") == "control"]} for sample in proposals])
     write_json(stage/"player-proposals.json", [{"time": sample["time"], "detections": [item for item in sample["detections"] if item.get("kind") == "player"]} for sample in proposals])
     write_json(stage/"review.json", {"version": 1, "brawler": metadata.get("brawler", "Unknown"),
-                                     "map": metadata.get("map"), "frames": review_frames})
+                                     "map": metadata.get("map"), "timing_warning": metadata.get("timing_warning"),
+                                     "frames": review_frames})
     emit_task(events, "replay", expected, expected)
     return output
 

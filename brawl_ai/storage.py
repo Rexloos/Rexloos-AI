@@ -36,23 +36,29 @@ def cleanup_recordings(style, budget=REPLAY_BUDGET):
         if analyses.is_symlink():
             continue
         completed = []
+        preserve_raw = False
         for stage in analyses.glob("*"):
             if stage.is_symlink() or not stage.is_dir():
                 continue
             try:
                 result = stage/"result.json"
-                if result.is_symlink() or json.loads(result.read_text())["recording"] != token:
+                if result.is_symlink():
+                    continue
+                data = json.loads(result.read_text())
+                if data["recording"] != token:
                     continue
                 replay = stage/"replay.mp4"
                 if replay.is_file() and not replay.is_symlink() and replay.stat().st_size:
                     completed.append(replay)
+                    preserve_raw = preserve_raw or bool(data.get("timing_warning"))
             except (OSError, ValueError, KeyError, TypeError):
                 continue
         if not completed:
             continue
         # The model and a playable replacement both exist before raw media goes.
-        for name in ("game.mkv", "input.jsonl", "recorder.log"):
-            discard(folder/name)
+        if not preserve_raw:
+            for name in ("game.mkv", "input.jsonl", "recorder.log"):
+                discard(folder/name)
         for replay in completed:
             replays.append((replay.stat().st_mtime_ns, replay, replay.stat().st_size))
     replays.sort(reverse=True)

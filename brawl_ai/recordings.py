@@ -135,7 +135,10 @@ class MatchRecording:
 
             env = environment()
             env["ADB"] = self.device.adb
-            video = subprocess.Popen([shutil.which("scrcpy"), "--serial", self.device.serial,
+            # scrcpy's stdout may otherwise remain buffered until shutdown.
+            stdbuf = shutil.which("stdbuf")
+            prefix = [stdbuf, "-oL", "-eL"] if stdbuf else []
+            video = subprocess.Popen([*prefix, shutil.which("scrcpy"), "--serial", self.device.serial,
                 "--no-control", "--no-audio", "--capture-orientation=@",
                 "--window-title=Brawl AI - Live recording", "--window-width=960",
                 "--max-size=1280", f"--max-fps={self.metadata['fps_limit']}", "--video-bit-rate=8M",
@@ -147,7 +150,8 @@ class MatchRecording:
                     for line in video.stdout:
                         stamp = time.monotonic()
                         stream.write(f"{stamp:.6f} {line}")
-                        if "Recording started to" in line and self.metadata["video_origin_host"] is None:
+                        if ("Recording started to" in line and self.metadata["video_origin_host"] is None
+                                and not self.stop_event.is_set()):
                             self.metadata["video_origin_host"] = stamp
                             self.events.put(("status", "Video recording started. Play on the phone; analysis is deferred until after Stop."))
 
@@ -172,8 +176,12 @@ class MatchRecording:
                     raise RuntimeError("Video or input recording ended unexpectedly. Raw files were kept; check recorder.log and USB.")
                 now = time.monotonic()
                 origin = self.metadata["video_origin_host"]
+                movie = self.folder/"game.mkv"
+                if origin is None and movie.exists() and movie.stat().st_size > 0:
+                    origin = self.metadata["video_origin_host"] = now
+                    self.metadata["timing_note"] = "Video origin estimated from first observed file data; verify action alignment."
+                    self.events.put(("status", "Video data detected. Recording is active; startup timing is approximate."))
                 if origin is not None and now-last_report >= 1:
-                    movie = self.folder/"game.mkv"
                     size = movie.stat().st_size/1048576 if movie.exists() else 0
                     elapsed = int(now-origin)
                     self.events.put(("progress", {"label": f"Recording {elapsed//60:02d}:{elapsed%60:02d} | {size:.1f} MB | live preview is open"}))
@@ -210,7 +218,7 @@ class MatchRecording:
                 if not movie.exists() or movie.stat().st_size == 0 or self.metadata["video_origin_host"] is None:
                     error = error or "No finalized video was recorded."
                 self.metadata.update(status="failed" if error else "ready", error=error,
-                                     timing_note="Video origin is a host log estimate; an optional sync offset can be configured.")
+                                     timing_note=self.metadata.get("timing_note", "Video origin is a host log estimate; an optional sync offset can be configured."))
                 try:
                     write_json(self.folder/"session.json", self.metadata)
                 except OSError as caught:
@@ -223,13 +231,17 @@ class MatchRecording:
             self.events.put(("done", None))
 
 
-def load_gestures(folder):
+def load_gestures(folder, allow_empty=False):
     metadata = json.loads((folder/"session.json").read_text())
     if metadata["status"] != "ready":
         raise ValueError("This recording did not finish successfully; keep the raw files and record again.")
-    rows = [json.loads(line) for line in (folder/"input.jsonl").read_text().splitlines() if line.strip()]
+    input_path = folder/"input.jsonl"
+    lines = input_path.read_text().splitlines() if input_path.exists() or not allow_empty else []
+    rows = [json.loads(line) for line in lines if line.strip()]
     rows = [row for row in rows if row["device"] is not None and row["host"] <= metadata["stopped_host"]]
     if not rows:
+        if allow_empty:
+            return metadata, []
         raise ValueError("No timestamped phone input was recorded.")
     clock_offset = min(row["host"]-row["device"] for row in rows)
     tracker = TouchTracker(metadata["input_device"], metadata["rotation"])
@@ -293,6 +305,14 @@ def decode_frame(video, stamp, stop_event=None):
 def action_requests(metadata, gestures, timestamps, size, offset):
     if not math.isfinite(offset) or abs(offset) > 30:
         raise ValueError("Video sync offset must be between -30 and 30 seconds.")
+    origin = metadata.get("video_origin_host")
+    tolerance = max(.25, min(2, timestamps[-1]*.1))
+    if origin is None or origin >= metadata["stopped_host"] or origin+timestamps[-1] > metadata["stopped_host"]+tolerance:
+        # Older buffered logs reported startup after Stop. Recover an approximate
+        # origin from the host stop time and the decoded video's duration.
+        tail = max(.02, min(.2, timestamps[-1]-timestamps[-2] if len(timestamps)>1 else .1))
+        metadata["video_origin_host"] = metadata["stopped_host"]-timestamps[-1]-tail
+        metadata["timing_warning"] = "Video startup log was delayed; timing uses an approximate video-end anchor. Check action alignment in replay."
     available = available_actions(metadata["controls"], set(metadata["calibrated"]))
     requests = []
     for gesture in gestures:
@@ -314,6 +334,8 @@ class RecordingAnalysis:
         self.events = queue.Queue()
         self.stop_event = threading.Event()
         self.success = False
+        self.review_only = False
+        self.learned_examples = 0
         self.error = None
         self.recognition_ready = recognition_ready
         self.replay_path = None
@@ -333,15 +355,18 @@ class RecordingAnalysis:
             if token in self.style.applied_recordings:
                 raise ValueError("This recording was already learned; it will not be counted twice.")
             emit_task(self.events, "gestures")
-            metadata, gestures = load_gestures(self.folder)
+            metadata, gestures = load_gestures(self.folder, allow_empty=True)
             emit_task(self.events, "gestures", 1, 1)
             emit_task(self.events, "index")
             timestamps, size = video_info(self.folder/"game.mkv", self.stop_event)
             metadata["video_size"] = size
             emit_task(self.events, "index", 1, 1)
             requests = action_requests(metadata, gestures, timestamps, size, self.offset)
+            if metadata.get("timing_warning"):
+                self.events.put(("status", metadata["timing_warning"]))
             if not requests:
-                raise ValueError("No supported actions align with the video. Check rotation, controls and sync offset.")
+                self.review_only = True
+                self.events.put(("status", "No aligned action examples. Preparing object review only; the player model and original recording will be preserved."))
             self.events.put(("progress", {"label": "Analysis: extracting examples...", "current": 0, "total": len(requests)}))
             # Stage an entire analysis; only one final atomic model save applies it.
             working = Playstyle(self.style.folder.parent.parent, self.style.player)
@@ -370,6 +395,8 @@ class RecordingAnalysis:
                     emit_task(self.events, "examples", index+1, len(requests))
                     self.events.put(("status", f"Post-game analysis: {index+1}/{len(requests)} actions"))
                     self.events.put(("progress", {"label": f"Analysis: {index+1}/{len(requests)} actions", "current": index+1, "total": len(requests)}))
+            if self.review_only:
+                emit_task(self.events, "examples", 1, 1, label="No aligned actions (object review only)")
             if self.stop_event.is_set():
                 self.events.put(("status", "Analysis cancelled. No player-model updates were applied."))
                 return
@@ -380,14 +407,26 @@ class RecordingAnalysis:
                 raise AnalysisCancelled()
             write_json(stage/"result.json", {"recording": token, "examples": len(requests),
                                              "sync_offset": self.offset, "map": metadata.get("map"),
+                                             "review_only": self.review_only,
+                                             "video_origin_host": metadata["video_origin_host"],
+                                             "timing_warning": metadata.get("timing_warning"),
                                              "replay": "replay.mp4"})
-            working.applied_recordings.append(token)
-            self.events.put(("progress", {"label": "Saving learned playstyle..."}))
-            emit_task(self.events, "model")
-            working.save()
-            emit_task(self.events, "model", 1, 1)
+            if requests:
+                working.applied_recordings.append(token)
+                self.events.put(("progress", {"label": "Saving learned playstyle..."}))
+                emit_task(self.events, "model")
+                working.save()
+            emit_task(self.events, "model", 1, 1, label="No action examples; model unchanged" if self.review_only else None)
             self.style = working
             self.success = True
+            self.learned_examples = len(requests)
+            if self.review_only:
+                self.events.put(("progress", {"label": "Object review ready. No actions learned; original video and input preserved.", "current": 1, "total": 1}))
+                return
+            if metadata.get("timing_warning"):
+                self.events.put(("status", "Estimated timing was used. Original recording kept so alignment can be inspected."))
+                self.events.put(("progress", {"label": f"Done: learned {len(requests)} actions with estimated timing; check replay", "current": 1, "total": 1}))
+                return
             try:
                 reclaimed = cleanup_recordings(working)
                 self.events.put(("status", f"Automatic cleanup freed {reclaimed/1048576:.1f} MB. Learning data and the newest replay were kept."))
