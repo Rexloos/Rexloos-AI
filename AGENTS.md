@@ -5,6 +5,11 @@
 - Write all repository content in English, including code, comments, documentation, names, and user interface text.
 - Communicate with the user in the language they use in their messages.
 
+## Session handoff
+
+- At the beginning of each new session, check for `resume.md` in the repository root. If present, read it fully before starting work and retain its context for the session, then delete it using `apply_patch`. It is a one-time handoff, not permanent documentation. Include the deletion in the next automatic local commit; do not recreate it unless the user requests another handoff.
+- When creating a handoff at the user's request, leave the new `resume.md` for the next session to consume. Do not delete it in the session that created it. If it is absent, continue normally.
+
 ## File changes and Git
 
 - Use `apply_patch` to create and edit files.
