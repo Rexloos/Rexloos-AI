@@ -15,11 +15,32 @@ def map_state(state, name):
 class MapRecognizer:
     def __init__(self, training_root, mode):
         self.path = Path(training_root) / "maps" / key(mode) / "recognizer.json"
-        self.samples = json.loads(self.path.read_text())["samples"] if self.path.exists() else []
+        data = json.loads(self.path.read_text()) if self.path.exists() else {}
+        self.samples = data.get("samples", [])
+        self.saved_names = set(data.get("names", [])) | {sample["name"] for sample in self.samples}
 
     @property
     def names(self):
-        return sorted({sample["name"] for sample in self.samples}, key=str.casefold)
+        return sorted(self.saved_names, key=str.casefold)
+
+    def canonical_name(self, name):
+        try:
+            name = normalize(name)
+        except ValueError as error:
+            raise ValueError("Enter a map name between 1 and 100 characters.") from error
+        return next((known for known in self.names if known.casefold() == name.casefold()), name)
+
+    def save(self, samples, names):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"version": 2, "names": sorted(names, key=str.casefold), "samples": samples}))
+        temporary.replace(self.path)
+        self.samples, self.saved_names = samples, names
+
+    def save_name(self, name):
+        name = self.canonical_name(name)
+        self.save(self.samples, self.saved_names | {name})
+        return name
 
     def features(self, image):
         w, h = image.size
@@ -28,8 +49,7 @@ class MapRecognizer:
         return list(crop.resize((16, 9)).tobytes())
 
     def learn(self, image, name):
-        name = normalize(name)
-        name = next((known for known in self.names if known.casefold() == name.casefold()), name)
+        name = self.canonical_name(name)
         pixels = self.features(image)
         if max(ImageStat.Stat(image.convert("RGB")).stddev) < 8:
             raise ValueError("Capture a detailed gameplay scene before teaching a map.")
@@ -38,11 +58,7 @@ class MapRecognizer:
         same = [sample for sample in samples if sample["name"].casefold() == name.casefold()][-11:]
         other = [sample for sample in samples if sample["name"].casefold() != name.casefold()]
         updated = other + same + [{"name": name, "pixels": pixels, "aspect": image.width/image.height}]
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"version": 1, "samples": updated}))
-        temporary.replace(self.path)
-        self.samples = updated
+        self.save(updated, self.saved_names | {name})
         return name
 
     def predict(self, image):

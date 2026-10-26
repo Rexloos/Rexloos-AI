@@ -73,13 +73,14 @@ def stop_process(process, interrupt=False):
 
 
 class MatchRecording:
-    def __init__(self, device, style, controls, calibrated, rotation, fps, metadata):
+    def __init__(self, device, style, controls, calibrated, rotation, fps, metadata, auto_rotation=True):
         self.device, self.style = device, style
         self.recording = True
         self.folder = style.folder / "recordings" / str(time.time_ns())
         self.metadata = {**metadata, "player": style.player, "controls": json.loads(json.dumps(controls)),
                          "calibrated": sorted(calibrated), "rotation": rotation, "fps_limit": fps,
                          "status": "recording", "video_origin_host": None}
+        self.auto_rotation = auto_rotation
         self.events = queue.Queue()
         self.stop_event = threading.Event()
         self.stopped_at = None
@@ -89,7 +90,8 @@ class MatchRecording:
         self.thread.start()
 
     def stop(self):
-        self.stopped_at = time.monotonic()
+        if self.stopped_at is None:
+            self.stopped_at = time.monotonic()
         self.stop_event.set()
 
     def run(self):
@@ -98,10 +100,19 @@ class MatchRecording:
         reader_errors = []
         error = None
         try:
+            self.events.put(("progress", {"label": "Starting recording and live preview..."}))
             video_tools()
             devices = touch_devices(self.device.command("shell", "getevent", "-lp").decode(errors="replace"))
             if len(devices) != 1:
                 raise RuntimeError("Expected one readable multitouch touchscreen for video recording.")
+            if self.auto_rotation:
+                try:
+                    output = self.device.command("shell", "dumpsys", "input").decode(errors="replace")
+                    orientation = re.search(r"SurfaceOrientation:\s*([0-3])", output)
+                    if orientation:
+                        self.metadata["rotation"] = int(orientation[1])*90
+                except subprocess.SubprocessError:
+                    pass
             self.folder.mkdir(parents=True)
             self.metadata.update(input_device=devices[0], started_host=time.monotonic())
             write_json(self.folder/"session.json", self.metadata)
@@ -119,7 +130,8 @@ class MatchRecording:
             env = environment()
             env["ADB"] = self.device.adb
             video = subprocess.Popen([shutil.which("scrcpy"), "--serial", self.device.serial,
-                "--no-control", "--no-audio", "--no-window", "--no-playback", "--capture-orientation=@",
+                "--no-control", "--no-audio", "--capture-orientation=@",
+                "--window-title=Brawl AI - Live recording", "--window-width=960",
                 "--max-size=1280", f"--max-fps={self.metadata['fps_limit']}", "--video-bit-rate=8M",
                 f"--record={self.folder/'game.mkv'}"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, env=env)
@@ -144,17 +156,32 @@ class MatchRecording:
                 reader = threading.Thread(target=guarded_reader, args=(target,), daemon=True)
                 readers.append(reader)
                 reader.start()
-            self.events.put(("status", "Starting video and raw touch recording (no detection or learning)..."))
+            self.events.put(("status", "Preparing game recording..."))
+            last_report = 0
             while not self.stop_event.wait(.1):
+                if video.poll() == 0:
+                    self.stopped_at = time.monotonic()
+                    break
                 if video.poll() is not None or inputs.poll() is not None:
                     raise RuntimeError("Video or input recording ended unexpectedly. Raw files were kept; check recorder.log and USB.")
+                now = time.monotonic()
+                origin = self.metadata["video_origin_host"]
+                if origin is not None and now-last_report >= 1:
+                    movie = self.folder/"game.mkv"
+                    size = movie.stat().st_size/1048576 if movie.exists() else 0
+                    elapsed = int(now-origin)
+                    self.events.put(("progress", {"label": f"Recording {elapsed//60:02d}:{elapsed%60:02d} | {size:.1f} MB | live preview is open"}))
+                    last_report = now
         except Exception as caught:
             error = str(caught)
         finally:
             self.metadata["stopped_host"] = self.stopped_at or time.monotonic()
-            for process, interrupt in ((video, True), (inputs, False)):
+            self.events.put(("progress", {"label": "Saving game: finalizing video...", "current": 0, "total": 3}))
+            for index, (process, interrupt) in enumerate(((video, True), (inputs, False)), 1):
                 try:
                     stop_process(process, interrupt)
+                    label = "Video saved. Saving your actions..." if index == 1 else "Video and actions saved. Finishing..."
+                    self.events.put(("progress", {"label": label, "current": index, "total": 3}))
                 except Exception as caught:
                     error = error or str(caught)
             for reader in readers:
@@ -171,13 +198,15 @@ class MatchRecording:
                 if not movie.exists() or movie.stat().st_size == 0 or self.metadata["video_origin_host"] is None:
                     error = error or "No finalized video was recorded."
                 self.metadata.update(status="failed" if error else "ready", error=error,
-                                     timing_note="Video origin is a host log estimate; verify sync offset before learning.")
+                                     timing_note="Video origin is a host log estimate; an optional sync offset can be configured.")
                 try:
                     write_json(self.folder/"session.json", self.metadata)
                 except OSError as caught:
                     error = str(caught)
             if error:
                 self.events.put(("error", error))
+            else:
+                self.events.put(("progress", {"label": "Game saved. Preparing post-game analysis...", "current": 3, "total": 3}))
             self.events.put(("done", None))
 
 
@@ -271,6 +300,8 @@ class RecordingAnalysis:
         self.recording = False
         self.events = queue.Queue()
         self.stop_event = threading.Event()
+        self.success = False
+        self.error = None
 
     def start(self):
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -281,6 +312,7 @@ class RecordingAnalysis:
 
     def run(self):
         try:
+            self.events.put(("progress", {"label": "Analysis: reading video and recorded actions..."}))
             token = self.folder.name
             if token in self.style.applied_recordings:
                 raise ValueError("This recording was already learned; it will not be counted twice.")
@@ -289,6 +321,7 @@ class RecordingAnalysis:
             requests = action_requests(metadata, gestures, timestamps, size, self.offset)
             if not requests:
                 raise ValueError("No supported actions align with the video. Check rotation, controls and sync offset.")
+            self.events.put(("progress", {"label": "Analysis: extracting examples...", "current": 0, "total": len(requests)}))
             # Stage an entire analysis; only one final atomic model save applies it.
             working = Playstyle(self.style.folder.parent.parent, self.style.player)
             if token in working.applied_recordings:
@@ -313,18 +346,23 @@ class RecordingAnalysis:
                     working.observe(state, request["action"])
                     stream.write(json.dumps({**request, "state": state, "image": filename})+"\n")
                     self.events.put(("status", f"Post-game analysis: {index+1}/{len(requests)} actions"))
+                    self.events.put(("progress", {"label": f"Analysis: {index+1}/{len(requests)} actions", "current": index+1, "total": len(requests)}))
             if self.stop_event.is_set():
                 self.events.put(("status", "Analysis cancelled. No player-model updates were applied."))
                 return
             write_json(stage/"result.json", {"recording": token, "examples": len(requests),
                                              "sync_offset": self.offset, "map": metadata.get("map")})
             working.applied_recordings.append(token)
+            self.events.put(("progress", {"label": "Saving learned playstyle..."}))
             working.save()
             self.style = working
+            self.success = True
+            self.events.put(("progress", {"label": f"Done: learned {len(requests)} actions", "current": 1, "total": 1}))
             self.events.put(("status", f"Analysis complete: learned {len(requests)} actions from the saved game."))
         except AnalysisCancelled:
             self.events.put(("status", "Analysis cancelled. No player-model updates were applied."))
         except Exception as error:
+            self.error = str(error)
             self.events.put(("error", str(error)))
         finally:
             self.events.put(("done", None))

@@ -74,7 +74,7 @@ class RecordingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             style = Playstyle(root, "Player")
             device = Mock(adb="adb", serial="phone")
-            device.command.return_value = DEVICE_TEXT.encode()
+            device.command.side_effect = lambda *args: b"SurfaceOrientation: 3" if "dumpsys" in args else DEVICE_TEXT.encode()
             inputs, video = Mock(), Mock()
             inputs.stdout = io.StringIO("[ 5.0] EV_SYN SYN_REPORT 00000000\n")
             video.stdout = io.StringIO("INFO: Recording started to mkv file: game.mkv\n")
@@ -98,6 +98,10 @@ class RecordingTests(unittest.TestCase):
             args = popen.call_args_list[1].args[0]
             self.assertIn("--no-control", args)
             self.assertIn("--no-audio", args)
+            self.assertNotIn("--no-window", args)
+            self.assertNotIn("--no-playback", args)
+            self.assertIn("--window-title=Brawl AI - Live recording", args)
+            self.assertEqual(session.metadata["rotation"], 270)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg tools unavailable")
     def test_synthetic_game_decodes_analyzes_and_is_not_learned_twice(self):
@@ -115,7 +119,8 @@ class RecordingTests(unittest.TestCase):
             again = RecordingAnalysis(folder, learned, Mock(), 0)
             again.run()
             self.assertEqual(Playstyle(Path(root)/"profile", "Player").examples, 2)
-            self.assertEqual(again.events.get_nowait()[0], "error")
+            self.assertIsNotNone(again.error)
+            self.assertFalse(again.success)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg tools unavailable")
     def test_failed_or_cancelled_analysis_does_not_apply_partial_examples(self):
@@ -131,4 +136,6 @@ class RecordingTests(unittest.TestCase):
             cancelled.stop()
             cancelled.run()
             self.assertEqual(style.path.read_bytes(), before)
-            self.assertEqual(cancelled.events.get_nowait()[0], "status")
+            messages = list(cancelled.events.queue)
+            self.assertTrue(any(kind == "status" and "cancelled" in value for kind, value in messages))
+            self.assertFalse(cancelled.success)

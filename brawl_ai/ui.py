@@ -68,6 +68,7 @@ class Console:
         self.map_name = tk.StringVar()
         self.map_select = ttk.Combobox(maps, textvariable=self.map_name, values=self.map_recognizer.names, width=24)
         self.map_select.pack(side="left")
+        tk.Button(maps, text="Save map name", command=self.save_map_name).pack(side="left")
         tk.Button(maps, text="Set / teach map", command=self.teach_map).pack(side="left")
         tk.Button(maps, text="Confirm map suggestion", command=self.confirm_map).pack(side="left")
         tk.Button(maps, text="Clear active map", command=self.clear_map).pack(side="left")
@@ -128,13 +129,16 @@ class Console:
         self.use_style = tk.BooleanVar(value=False)
         self.style_strength = tk.DoubleVar(value=.7)
         self.touch_rotation = tk.StringVar(value="90")
-        self.touch_aligned = tk.BooleanVar(value=False)
         self.demo_interval = tk.StringVar(value="0.5")
         self.video_fps = tk.StringVar(value="30")
         self.recording_name = tk.StringVar()
         self.sync_offset = tk.StringVar(value="0")
-        self.sync_checked = tk.BooleanVar(value=False)
         self.review_action = tk.IntVar(value=1)
+        self.touch_auto = tk.BooleanVar(value=True)
+        self.player_phase = tk.StringVar(value="Ready to record a game")
+        self.player_progress = tk.DoubleVar(value=0)
+        self.player_bar = self.player_dialog = None
+        self.auto_analyze = False
         self.style = Playstyle(self.folder, self.player_name.get())
         self.style_status = tk.StringVar(value=f"Player style: {self.style.examples} examples | imitation off")
         style_bar = tk.Frame(self.root)
@@ -190,29 +194,48 @@ class Console:
         return False
 
     def player_window(self):
+        if self.player_dialog is not None and self.player_dialog.winfo_exists():
+            self.player_dialog.lift()
+            return
         window = tk.Toplevel(self.root)
+        self.player_dialog = window
         window.title("Learn a player's playstyle")
-        tk.Label(window, wraplength=560, justify="left", text="First preview and align phone touches. Then record the whole game as video plus raw input. No detection or learning runs during video capture. After Stop, check synchronization and analyze the saved recording.").pack(padx=12, pady=10)
-        row = tk.Frame(window)
+        tk.Label(window, wraplength=560, justify="left", text="Start recording, play on your phone, then stop. A live video window shows what is recorded. Saving and analysis run automatically after Stop.").pack(padx=12, pady=10)
+        primary = tk.Frame(window)
+        primary.pack(pady=8)
+        self.player_record_button = tk.Button(primary, text="Start recording", command=lambda: self.start_player(True))
+        self.player_record_button.pack(side="left", padx=8)
+        self.player_stop_button = tk.Button(primary, text="Stop recording / cancel analysis", command=self.stop_player)
+        self.player_stop_button.pack(side="left", padx=8)
+        tk.Label(window, textvariable=self.player_phase, wraplength=560).pack(padx=12, pady=8)
+        self.player_bar = ttk.Progressbar(window, variable=self.player_progress, maximum=100, length=500)
+        self.player_bar.pack(padx=12, pady=6)
+        tk.Label(window, textvariable=self.style_status, wraplength=560).pack(padx=12, pady=8)
+        tk.Checkbutton(window, text="Use learned playstyle for AI decisions", variable=self.use_style).pack()
+        advanced = tk.Frame(window)
+        def toggle_advanced():
+            if advanced.winfo_manager():
+                advanced.pack_forget()
+            else:
+                advanced.pack(padx=12, pady=10)
+        tk.Button(window, text="Advanced settings / saved games", command=toggle_advanced).pack(pady=6)
+        row = tk.Frame(advanced)
         row.pack()
         tk.Label(row, text="Player:").pack(side="left")
         tk.Entry(row, textvariable=self.player_name).pack(side="left")
         tk.Button(row, text="Load style", command=self.load_style).pack(side="left")
-        row = tk.Frame(window)
+        tk.Checkbutton(advanced, text="Detect touch rotation automatically", variable=self.touch_auto).pack()
+        row = tk.Frame(advanced)
         row.pack()
         tk.Label(row, text="Touch rotation:").pack(side="left")
         rotation = ttk.Combobox(row, textvariable=self.touch_rotation, values=("0", "90", "180", "270"), width=6, state="readonly")
         rotation.pack(side="left")
-        rotation.bind("<<ComboboxSelected>>", lambda event: self.touch_aligned.set(False))
         tk.Label(row, text="Input preview gap (seconds):").pack(side="left")
         tk.Spinbox(row, textvariable=self.demo_interval, from_=.2, to=3, increment=.1, width=6).pack(side="left")
-        tk.Checkbutton(window, text="I checked touch alignment in preview", variable=self.touch_aligned).pack()
-        row = tk.Frame(window)
+        row = tk.Frame(advanced)
         row.pack(pady=8)
         tk.Button(row, text="Preview phone input", command=lambda: self.start_player(False)).pack(side="left")
-        tk.Button(row, text="Record full game", command=lambda: self.start_player(True)).pack(side="left")
-        tk.Button(row, text="Stop / cancel analysis", command=self.stop_player).pack(side="left")
-        row = tk.Frame(window)
+        row = tk.Frame(advanced)
         row.pack()
         tk.Label(row, text="Video FPS limit:").pack(side="left")
         ttk.Combobox(row, textvariable=self.video_fps, values=("15", "30", "60"), state="readonly", width=5).pack(side="left")
@@ -220,25 +243,48 @@ class Console:
         recordings = ttk.Combobox(row, textvariable=self.recording_name, width=24, state="readonly")
         recordings.configure(postcommand=lambda: recordings.configure(values=sorted(
             path.parent.name for path in (self.style.folder/"recordings").glob("*/session.json"))))
-        recordings.bind("<<ComboboxSelected>>", lambda event: self.sync_checked.set(False))
         recordings.pack(side="left")
-        row = tk.Frame(window)
+        row = tk.Frame(advanced)
         row.pack(pady=8)
         tk.Label(row, text="Video/input offset (seconds):").pack(side="left")
         offset = tk.Entry(row, textvariable=self.sync_offset, width=7)
         offset.pack(side="left")
-        offset.bind("<KeyRelease>", lambda event: self.sync_checked.set(False))
         tk.Label(row, text="Action:").pack(side="left")
         tk.Spinbox(row, textvariable=self.review_action, from_=1, to=100000, width=6).pack(side="left")
         tk.Button(row, text="Preview recorded action", command=self.preview_game).pack(side="left")
-        tk.Checkbutton(window, text="I checked video/input synchronization", variable=self.sync_checked).pack()
-        tk.Button(window, text="Analyze saved game and learn", command=self.analyze_game).pack(pady=6)
-        tk.Checkbutton(window, text="Use loaded player style for AI decisions", variable=self.use_style).pack()
-        tk.Scale(window, variable=self.style_strength, from_=0, to=1, resolution=.05,
+        tk.Button(advanced, text="Analyze selected saved game", command=self.analyze_game).pack(pady=6)
+        tk.Scale(advanced, variable=self.style_strength, from_=0, to=1, resolution=.05,
                  orient="horizontal", label="Imitation influence (0 = reward policy, 1 = player preferences)", length=470).pack()
-        tk.Label(window, textvariable=self.style_status, wraplength=560).pack(padx=12, pady=10)
-        tk.Label(window, wraplength=560, text="Examples are saved per player, brawler and mode. Observation never sends game input. Held movement and simultaneous fingers are reduced to individual actions; AI cannot reproduce simultaneous multitouch yet.").pack(padx=12, pady=10)
-        window.protocol("WM_DELETE_WINDOW", lambda: (self.stop_player(), window.destroy()))
+        tk.Label(advanced, wraplength=560, text="Names, controls and map come from the active profile. If touch mapping or timing needs correction, use the optional preview and offset settings. Recording does not train the model; analysis does.").pack(padx=12, pady=10)
+        def close_window():
+            if self.player_session is not None:
+                self.auto_analyze = False
+                self.stop_player()
+            else:
+                window.destroy()
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        self.update_player_buttons()
+
+    def update_player_buttons(self):
+        for name, enabled in (("player_record_button", self.player_session is None),
+                              ("player_stop_button", self.player_session is not None)):
+            button = getattr(self, name, None)
+            if button is not None and button.winfo_exists():
+                button.configure(state="normal" if enabled else "disabled")
+
+    def set_player_progress(self, label, current=None, total=None):
+        if not hasattr(self, "player_phase"):
+            return
+        self.player_phase.set(f"{label} ({100*current/total:.0f}%)" if total else label)
+        bar = self.player_bar
+        if bar is not None and bar.winfo_exists():
+            bar.stop()
+            bar.configure(mode="determinate" if total else "indeterminate")
+            if not total:
+                bar.start(50)
+        if total:
+            self.player_progress.set(100*current/total)
+        self.update_player_buttons()
 
     def load_style(self):
         if self.player_guard():
@@ -247,7 +293,6 @@ class Console:
             style = Playstyle(self.folder, self.player_name.get())
             self.style = style
             self.recording_name.set("")
-            self.sync_checked.set(False)
             self.style_status.set(f"Loaded {style.player}: {style.examples} player examples")
         except (OSError, ValueError) as error:
             self.status.set(str(error))
@@ -258,8 +303,9 @@ class Console:
         if self.busy:
             self.status.set("Wait for the current capture or AI action before observing the player.")
             return
-        if recording and (not self.touch_aligned.get() or not {"move", "attack"}.issubset(self.calibrated)):
-            self.status.set("Calibrate move/attack and verify touch alignment in preview before recording.")
+        if recording and not {"move", "attack"}.issubset(self.calibrated):
+            self.status.set("Calibrate move and attack in the main console before recording.")
+            self.set_player_progress("Calibrate move and attack first", 0, 1)
             return
         try:
             rotation = int(self.touch_rotation.get())
@@ -276,6 +322,7 @@ class Console:
                 video_tools()
         except (OSError, ValueError, RuntimeError) as error:
             self.status.set(str(error))
+            self.set_player_progress(f"Could not start recording: {error}", 0, 1)
             return
         self.pause()
         self.stop_capture()
@@ -288,18 +335,21 @@ class Console:
             return map_state(enemy_state(image, detections, detector.ready), active_map), detections
         if recording:
             self.player_session = MatchRecording(self.device, style, self.controls, self.calibrated,
-                                                 rotation, fps, {**self.profile.record(), "map": active_map})
-            self.sync_checked.set(False)
+                                                 rotation, fps, {**self.profile.record(), "map": active_map},
+                                                 auto_rotation=self.touch_auto.get())
+            self.auto_analyze = True
         else:
             self.player_session = PlayerSession(self.device, style, self.controls, self.calibrated,
                                                 rotation, interval, state_builder, False)
         self.player_session.start()
+        self.set_player_progress("Starting recording and live preview..." if recording else "Input preview is starting...")
         self.style_status.set("Starting full-game video recording (no learning)..." if recording else "Starting input preview (no learning)...")
         self.root.after(100, self.poll_player)
 
     def stop_player(self):
         if self.player_session is not None:
             self.player_session.stop()
+            self.set_player_progress("Saving recorded game..." if isinstance(self.player_session, MatchRecording) else "Stopping analysis / preview...")
             self.style_status.set("Stopping/finalizing recording or cancelling analysis. Please wait...")
 
     def selected_game(self):
@@ -349,15 +399,13 @@ class Console:
     def analyze_game(self):
         if self.player_guard() or self.busy:
             return
-        if not self.sync_checked.get():
-            self.status.set("Preview recorded actions and confirm video/input synchronization before learning.")
-            return
         try:
             path, metadata, offset = self.selected_game()
             video_tools()
             style = Playstyle(self.folder, self.style.player)
         except (OSError, ValueError, RuntimeError) as error:
             self.status.set(str(error))
+            self.set_player_progress(f"Could not start analysis: {error}", 0, 1)
             return
         self.pause()
         self.stop_capture()
@@ -369,6 +417,7 @@ class Console:
             return map_state(enemy_state(image, detections, detector.ready), metadata.get("map")), detections
         self.player_session = RecordingAnalysis(path, style, state_builder, offset)
         self.player_session.start()
+        self.set_player_progress("Analysis: reading saved video and actions...")
         self.style_status.set("Analyzing the saved game; model updates apply only after successful completion...")
         self.root.after(100, self.poll_player)
 
@@ -390,8 +439,12 @@ class Console:
                         self.canvas.create_oval(x-7, y-7, x+7, y+7, outline="cyan", width=3)
                     self.style_status.set(f"{'Recording' if session.recording else 'Input preview'} | Examples: {count} | Skipped: {skipped} | Last touch: {point}")
                 elif kind == "error":
+                    self.auto_analyze = False
                     self.status.set(value)
                     self.style_status.set("Player observation failed; see the console status.")
+                    self.set_player_progress(f"Failed: {value}", 0, 1)
+                elif kind == "progress":
+                    self.set_player_progress(**{key: value[key] for key in ("label", "current", "total") if key in value})
                 elif kind == "status":
                     self.style_status.set(value)
                 elif kind == "done":
@@ -399,15 +452,29 @@ class Console:
                     self.player_session = None
                     if isinstance(session, MatchRecording) and session.metadata.get("status") == "ready":
                         self.recording_name.set(session.folder.name)
-                        self.style_status.set("Game video saved. Check synchronization, then analyze the saved game to learn.")
+                        self.style_status.set("Game saved. Starting post-game analysis...")
+                        if self.auto_analyze:
+                            self.analyze_game()
+                        else:
+                            self.set_player_progress("Game saved. Analysis can be started from saved games.", 1, 1)
+                    elif isinstance(session, RecordingAnalysis):
+                        if session.success:
+                            self.use_style.set(True)
+                            self.style_status.set(f"Learning complete | {self.style.examples} player examples | imitation enabled")
+                            self.set_player_progress("Done. Player playstyle saved and ready to use.", 1, 1)
+                        elif session.error:
+                            self.set_player_progress(f"Analysis failed: {session.error}", 0, 1)
+                        else:
+                            self.set_player_progress("Analysis stopped. Previous learning was preserved.", 0, 1)
                     elif not isinstance(session, RecordingAnalysis):
                         self.style_status.set(f"Loaded {self.style.player}: {self.style.examples} examples | observation stopped")
+                    self.update_player_buttons()
                     return
         except Exception as error:
             session.stop()
             self.status.set(f"Player observation error: {error}")
         finally:
-            if self.player_session is not None:
+            if self.player_session is session:
                 self.root.after(100, self.poll_player)
 
     def capture_blocked(self):
@@ -472,6 +539,17 @@ class Console:
         else:
             text += " | No learned map match."
         self.map_status.set(text)
+
+    def save_map_name(self):
+        if self.player_guard():
+            return
+        try:
+            name = self.map_recognizer.save_name(self.map_name.get())
+            self.map_name.set(name)
+            self.map_select.configure(values=self.map_recognizer.names)
+            self.status.set(f"Saved map name: {name}. It stays available after restart. Set / teach map confirms it for gameplay.")
+        except (OSError, ValueError) as error:
+            self.status.set(str(error))
 
     def teach_map(self):
         if self.player_guard():
@@ -1029,6 +1107,7 @@ class Console:
 
     def close(self):
         if self.player_session is not None:
+            self.auto_analyze = False
             self.stop_player()
             self.status.set("Wait for player observation to stop, then close the console again.")
             return

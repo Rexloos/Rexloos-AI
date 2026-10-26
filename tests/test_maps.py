@@ -20,6 +20,34 @@ def scene(color):
 
 
 class MapTests(unittest.TestCase):
+    def test_names_persist_without_examples_and_survive_example_corrections(self):
+        with tempfile.TemporaryDirectory() as root:
+            model = MapRecognizer(root, "Gem Grab")
+            self.assertEqual(model.save_name("  Saved   Map "), "Saved Map")
+            loaded = MapRecognizer(root, "gem grab")
+            self.assertEqual(loaded.names, ["Saved Map"])
+            self.assertEqual(loaded.save_name("saved map"), "Saved Map")
+            self.assertEqual(loaded.samples, [])
+            self.assertIsNone(loaded.predict(scene("red")))
+            loaded.learn(scene("red"), "Saved Map")
+            loaded.learn(scene("red"), "Corrected Map")
+            self.assertEqual(MapRecognizer(root, "Gem Grab").names, ["Corrected Map", "Saved Map"])
+            self.assertEqual(MapRecognizer(root, "Heist").names, [])
+
+    def test_ui_saves_name_without_capture_or_changing_learning_context(self):
+        with tempfile.TemporaryDirectory() as root:
+            console = Console.__new__(Console)
+            console.map_recognizer = MapRecognizer(root, "Gem Grab")
+            console.map_name = Mock(get=Mock(return_value="New Map"))
+            console.map_select = Mock()
+            console.status = Mock()
+            console.active_map = "Current Map"
+            console.pending = ("before", 0, "after")
+            console.save_map_name()
+            self.assertEqual(MapRecognizer(root, "Gem Grab").names, ["New Map"])
+            self.assertEqual(console.active_map, "Current Map")
+            self.assertEqual(console.pending, ("before", 0, "after"))
+
     def test_learns_names_recognizes_and_isolates_modes(self):
         with tempfile.TemporaryDirectory() as root:
             model = MapRecognizer(root, "Gem Grab")
