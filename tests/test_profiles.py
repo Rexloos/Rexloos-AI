@@ -47,13 +47,15 @@ class ProfileTests(unittest.TestCase):
             console.agent = Learner(old_folder / "policy.json")
             console.pending = ("before", 1, "after")
             console.reward = 2
+            console.active_map = "Old Map"
+            console.map_prediction = None
             console.controls = {}
             console.calibrated = {"move", "attack"}
             console.busy = console.running = False
             console.auto_job = None
             console.image = object()
             console.mode = "label"
-            for name in ("status", "profile_status", "recommendation_status", "detection_status", "canvas", "brawler_select", "mode_select"):
+            for name in ("status", "profile_status", "recommendation_status", "detection_status", "canvas", "brawler_select", "mode_select", "map_name", "map_select", "map_status"):
                 setattr(console, name, Mock())
             console.brawler_name = Mock(get=Mock(return_value="Colt"))
             console.mode_name = Mock(get=Mock(return_value="Heist"))
@@ -67,6 +69,8 @@ class ProfileTests(unittest.TestCase):
             self.assertIsNone(console.image)
             record = json.loads((old_folder / "transitions.jsonl").read_text())
             self.assertEqual(record["brawler"], "Shelly")
+            self.assertEqual(record["map"], "Old Map")
+            self.assertIsNone(console.active_map)
             self.assertTrue(record["terminal"])
 
     def test_busy_switch_does_not_change_profile(self):

@@ -12,6 +12,7 @@ from .learning import ACTIONS, Learner, available_actions
 from .profiles import BRAWLERS, Profile, choices
 from .curriculum import recommend
 from .detection import EnemyDetector, enemy_state
+from .maps import MapRecognizer, map_state
 
 
 class Console:
@@ -25,6 +26,8 @@ class Console:
         self.agent = Learner(self.folder / "policy.json")
         self.detector = EnemyDetector(self.folder)
         self.detections = []
+        self.map_recognizer = MapRecognizer(self.training_root, self.profile.mode)
+        self.active_map = self.map_prediction = None
         self.controls_path = self.training_root / "controls.json"
         self.calibrated = set(json.loads(self.controls_path.read_text()).get("calibrated", [])) if self.controls_path.exists() else set()
         self.controls = json.loads(self.controls_path.read_text()) if self.controls_path.exists() else {"move": [0.15, 0.75], "attack": [0.85, 0.75], "radius": 0.10}
@@ -48,6 +51,17 @@ class Console:
         tk.Button(selector, text="Load / create profile", command=self.switch_profile).pack(side="left")
         self.profile_status = tk.StringVar()
         tk.Label(self.root, textvariable=self.profile_status).pack()
+        maps = tk.Frame(self.root)
+        maps.pack()
+        tk.Label(maps, text="Map:").pack(side="left")
+        self.map_name = tk.StringVar()
+        self.map_select = ttk.Combobox(maps, textvariable=self.map_name, values=self.map_recognizer.names, width=24)
+        self.map_select.pack(side="left")
+        tk.Button(maps, text="Set / teach map", command=self.teach_map).pack(side="left")
+        tk.Button(maps, text="Confirm map suggestion", command=self.confirm_map).pack(side="left")
+        tk.Button(maps, text="Clear active map", command=self.clear_map).pack(side="left")
+        self.map_status = tk.StringVar(value="Active map: unassigned. Capture and enter its name.")
+        tk.Label(self.root, textvariable=self.map_status).pack()
         self.update_profile_status()
         self.status = tk.StringVar(value="Open the game manually, enter the training area, then capture and calibrate.")
         tk.Label(self.root, textvariable=self.status, wraplength=950).pack()
@@ -113,6 +127,56 @@ class Console:
     def update_profile_status(self):
         self.profile_status.set(f"Active: {self.profile.brawler} / {self.profile.mode} | Learned transitions: {self.agent.steps}")
 
+    def update_map_status(self):
+        text = f"Active map: {self.active_map or 'unassigned'}"
+        if self.map_prediction:
+            proposal = self.map_prediction
+            qualifier = "suggestion" if proposal["confident"] else "uncertain match"
+            text += f" | {qualifier}: {proposal['name']} ({proposal['score']:.2f}); confirm or enter the actual map."
+        else:
+            text += " | No learned map match."
+        self.map_status.set(text)
+
+    def teach_map(self):
+        self.pause()
+        if self.busy or self.mode or self.image is None:
+            self.status.set("Finish the current operation and capture gameplay before teaching a map.")
+            return
+        try:
+            # Commit to the previous map before its name or visual interpretation changes.
+            from .profiles import normalize
+            name = normalize(self.map_name.get())
+            self.finish(terminal=True)
+            name = self.map_recognizer.learn(self.image, name)
+            self.active_map = name
+            self.map_name.set(name)
+            self.map_select.configure(values=self.map_recognizer.names)
+            self.map_prediction = self.map_recognizer.predict(self.image)
+            filename = f"map-frame-{time.time_ns()}.png"
+            self.image.save(self.folder / filename)
+            self.log("map-examples.jsonl", {"image": filename, "map": name})
+            self.update_map_status()
+            self.status.set("Map confirmed and example saved. Capture more viewpoints and teach the same name.")
+        except (OSError, ValueError) as error:
+            self.status.set(str(error))
+
+    def confirm_map(self):
+        if self.busy or not self.map_prediction:
+            self.status.set("Capture a frame with a map suggestion first.")
+            return
+        self.map_name.set(self.map_prediction["name"])
+        self.teach_map()
+
+    def clear_map(self):
+        self.pause()
+        if self.busy:
+            self.status.set("Wait for the current operation before clearing the map.")
+            return
+        self.finish(terminal=True)
+        self.active_map = None
+        self.map_name.set("")
+        self.update_map_status()
+
     def load_gadget_mode(self):
         mode = self.profile.gadget_mode()
         if mode is None:
@@ -165,6 +229,7 @@ class Console:
             folder = profile.prepare()
             agent = Learner(folder / "policy.json")
             detector = EnemyDetector(folder)
+            map_recognizer = MapRecognizer(self.training_root, profile.mode)
         except (OSError, ValueError) as error:
             self.status.set(str(error))
             return
@@ -175,6 +240,11 @@ class Console:
         self.finish(terminal=True)
         self.agent.save()
         self.profile, self.folder, self.agent = profile, folder, agent
+        self.map_recognizer = map_recognizer
+        self.active_map = self.map_prediction = None
+        self.map_name.set("")
+        self.map_select.configure(values=self.map_recognizer.names)
+        self.update_map_status()
         self.detector, self.detections = detector, []
         self.detection_status.set("Enemy detector: capture a frame for this profile.")
         self.mode = self.image = None
@@ -221,6 +291,8 @@ class Console:
     def show(self, result):
         image, self.detections = result
         self.image = image
+        self.map_prediction = self.map_recognizer.predict(image)
+        self.update_map_status()
         preview = image.copy()
         preview.thumbnail((960, 540))
         self.preview_size = preview.size
@@ -420,7 +492,7 @@ class Console:
             self.status.set(str(error))
 
     def log(self, name, record):
-        record = {**record, **self.profile.record()}
+        record = {"map": self.active_map, **record, **self.profile.record()}
         with (self.folder / name).open("a") as stream:
             stream.write(json.dumps(record) + "\n")
 
@@ -476,7 +548,7 @@ class Console:
             self.running = False
             return
         self.finish()
-        state = enemy_state(self.image, self.detections, self.detector.ready)
+        state = map_state(enemy_state(self.image, self.detections, self.detector.ready), self.active_map)
         action = self.agent.choose(state, available_actions(self.controls, self.calibrated))
         def execute():
             self.device.action(ACTIONS[action], self.image.size, self.controls)
@@ -484,7 +556,7 @@ class Console:
             return self.capture_frame()
         def complete(result):
             self.show(result)
-            self.pending = (state, action, enemy_state(self.image, self.detections, self.detector.ready))
+            self.pending = (state, action, map_state(enemy_state(self.image, self.detections, self.detector.ready), self.active_map))
             self.status.set(f"Action: {ACTIONS[action]} | Learned transitions: {self.agent.steps} | Give feedback now.")
             if self.running:
                 self.auto_job = self.root.after(1500, self.auto_step)
@@ -515,6 +587,9 @@ class Console:
         self.finish(terminal=True)
         self.refresh_recommendation()
         self.image = None
+        self.active_map = self.map_prediction = None
+        self.map_name.set("")
+        self.update_map_status()
         self.status.set("Episode saved. Reset the game manually and capture a new frame.")
 
     def close(self):

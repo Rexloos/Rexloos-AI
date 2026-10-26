@@ -89,7 +89,19 @@ Keep the emulator open. In a second terminal with the virtual environment activa
 python -m brawl_ai teach --serial emulator-5554
 ```
 
-### Brawler and mode profiles
+### Map names and recognition
+
+After entering the match, pause and **Capture** a gameplay frame. Type its name into **Map** and click **Set / teach map**. You can enter any map name; previously taught names appear in the dropdown. This confirms the active map and saves a labeled scene example. Teach the same name from several different viewpoints, positions and matches, rather than from menus or loading screens.
+
+Subsequent captures and AI steps display the closest learned map and its similarity score. **Confirm map suggestion** accepts that proposal and teaches the current scene; if it is wrong, enter the correct name and use **Set / teach map**. Suggestions never automatically change the active map or train themselves. Low similarity or a small gap between competing maps is displayed as an uncertain match. An empty model makes no proposal. **Clear active map** clears the current assignment while keeping learned examples.
+
+Confirmed map names are included in policy state keys and new transition/annotation records. Brawler/mode policies stay independent, with separate Q values for each named map inside the policy. Previously learned unnamed states remain untouched. Changing the active map pauses stepping and commits the pending transition to the previous map as an episode boundary. The active name is cleared at episode end, profile switch and startup to avoid silently carrying a map into another match. Confirm or enter it again after capturing the next match. Editing the text field alone does not change the active map.
+
+Map recognition starts without pretrained weights and stores up to 12 scene descriptors per name. It is shared across brawlers within the same game mode, in `training/maps/<mode-key>/recognizer.json`; different modes keep separate map examples. Confirmed screenshots and `map-examples.jsonl` stay in the active brawler/mode profile. Case and repeated whitespace do not create duplicate map names, and custom names are supported. The current rotation and match changes are not fetched or detected automatically.
+
+Recognition compares coarse RGB scene appearance after excluding most screen edges and controls. Camera motion, destroyed obstacles, effects and visually similar maps can confuse it. A score is a visual similarity, not a probability or proof of mastery. This is a basic human-taught recognizer, not a guarantee of eventual recognition of every map. Synthetic automated tests cover matching, ambiguous scenes, persistence, mode isolation and safe context switching; map recognition has not been manually verified in the game.
+
+### Training recommendations and profiles
 
 The console automatically recommends a **brawler, mode and exercise**, with an explanation. Recommendations refresh at startup, after switching profiles, every 20 committed transitions and at episode end. **Refresh recommendation** updates it on demand; **Load recommended profile** opens the suggested profile using the normal safe switching rules. You still select the matching brawler and mode manually in the game.
 
@@ -166,6 +178,8 @@ Default layout:
   android/                  # Android user configuration
   training/
     controls.json           # Normalized control coordinates and calibration status
+    maps/<mode-key>/
+      recognizer.json       # Confirmed map names and scene descriptors
     profiles/
       <brawler-key>/<mode-key>/
         profile.json        # Original brawler and mode names
@@ -174,6 +188,8 @@ Default layout:
         annotations.jsonl   # Image filenames, labels, normalized xyxy boxes
         enemy-detector.json # Human-taught appearance templates and corrections
         box-feedback.jsonl  # Original/corrected rectangles and rejection reasons
+        map-examples.jsonl  # Confirmed map names and screenshot filenames
+        map-frame-*.png     # Human-confirmed map examples
         frame-*.png         # Annotated screenshots for this combination
 ```
 
