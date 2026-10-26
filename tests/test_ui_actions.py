@@ -52,6 +52,27 @@ def console_fixture(folder):
 
 class UiActionTests(unittest.TestCase):
     @patch("brawl_ai.ui.time.sleep")
+    def test_bootstrap_availability_stays_with_the_completed_action_frame(self, sleep):
+        with tempfile.TemporaryDirectory() as folder:
+            console = console_fixture(folder)
+            console.controls["super"] = [.8, .8]
+            console.calibrated.add("super")
+            blocked = {"kind": "control", "control": "super", "state": "uncharged", "state_score": .95,
+                       "score": .98, "box": [.7, .7, .8, .8]}
+            console.capture_frame = Mock(return_value=(console.image, [blocked]))
+            console.one_step()
+            operation, callback = console.work.call_args.args
+            callback(operation())
+            saved = list(console.pending_available)
+            self.assertNotIn(ACTIONS.index("super"), saved)
+            console.detections = [{**blocked, "state": "ready"}]
+            console.reward = 1
+            console.update_profile_status = Mock()
+            console.refresh_recommendation = Mock()
+            Console.finish(console)
+            self.assertEqual(console.agent.update.call_args.kwargs["available"], saved)
+
+    @patch("brawl_ai.ui.time.sleep")
     @patch("brawl_ai.ui.random.random", return_value=0)
     def test_loaded_player_style_can_override_reward_policy_choice(self, random, sleep):
         with tempfile.TemporaryDirectory() as folder:

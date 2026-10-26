@@ -11,6 +11,7 @@ import time
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from .playstyle import TouchTracker, gesture_action, rotate_point, touch_control
+from .hud import hud_label
 
 TASKS = (("video", "Save game video"), ("input", "Save phone input"),
          ("index", "Read video timeline"), ("gestures", "Interpret finger gestures"),
@@ -94,8 +95,9 @@ def draw_overlay(image, stamp, timeline, times, detections, recognition_ready=Tr
             label(point[0]+10, point[1]-24, f"Finger {contact['slot']}: {action} {'(drag)' if contact['drag'] else '(press)'}", color)
     for detection in detections:
         x0, y0, x1, y1 = detection["box"]
-        draw.rectangle((x0*w, y0*h, x1*w, y1*h), outline="red", width=2)
-        label(x0*w, y0*h-22, f"{detection.get('identity', 'Unknown')}? {detection.get('identity_score', 0):.2f}", "red")
+        color = "cyan" if detection.get("kind") == "control" else "red"
+        draw.rectangle((x0*w, y0*h, x1*w, y1*h), outline=color, width=2)
+        label(x0*w, y0*h-22, hud_label(detection), color)
     label(8, 8, f"{stamp:.1f}s | Character proposals sampled" if recognition_ready else
           f"{stamp:.1f}s | Character recognition needs labeled examples", "white")
     return image
@@ -145,7 +147,7 @@ def render_replay(folder, stage, metadata, duration, state_builder, offset, stop
                     break
                 stamp = count/fps
                 image = Image.frombytes("RGB", (width, height), raw)
-                if recognition_ready and stamp >= next_detection:
+                if stamp >= next_detection:
                     _, detections = state_builder(image)
                     proposals.append({"time": stamp, "detections": detections})
                     next_detection = stamp+1
@@ -169,7 +171,8 @@ def render_replay(folder, stage, metadata, duration, state_builder, offset, stop
                         process.stdin.close()
     write_json(stage/"replay.json", {"width": width, "height": height, "fps": fps, "frames": count,
         "duration": count/fps, "sync_offset": offset, "recognition_ready": recognition_ready})
-    write_json(stage/"character-proposals.json", proposals)
+    write_json(stage/"character-proposals.json", [{"time": sample["time"], "detections": [item for item in sample["detections"] if item.get("kind") != "control"]} for sample in proposals])
+    write_json(stage/"control-proposals.json", [{"time": sample["time"], "detections": [item for item in sample["detections"] if item.get("kind") == "control"]} for sample in proposals])
     emit_task(events, "replay", expected, expected)
     return output
 

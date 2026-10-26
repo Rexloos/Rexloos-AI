@@ -50,3 +50,10 @@ class ReplayTests(unittest.TestCase):
         stream = io.BytesIO(b"abc")
         self.assertEqual(read_exact(stream, 3), b"abc")
         self.assertIsNone(read_exact(stream, 1))
+
+    def test_control_boxes_render_even_without_enemy_recognition_examples(self):
+        frame = Image.new("RGB", (640, 360))
+        control = {"kind": "control", "control": "super", "box": [.75, .5, .9, .6],
+                   "state": "uncharged", "state_score": .95}
+        annotated = draw_overlay(frame, 0, [], [], [control], False)
+        self.assertEqual(annotated.getpixel((480, 180)), (0, 255, 255))

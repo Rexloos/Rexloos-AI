@@ -20,6 +20,7 @@ from .playstyle import Playstyle, PlayerSession
 from .recordings import (MatchRecording, RecordingAnalysis, video_tools, load_gestures,
                          video_info, action_requests, decode_frame)
 from .replay import TASKS, ReplayPlayer
+from .hud import CONTROLS, STATES, HudDetector, hud_label
 
 
 class Console:
@@ -32,6 +33,7 @@ class Console:
         self.folder = self.profile.prepare()
         self.agent = Learner(self.folder / "policy.json")
         self.detector = EnemyDetector(self.folder)
+        self.hud_detector = HudDetector(self.folder)
         self.detections = []
         self.map_recognizer = MapRecognizer(self.training_root, self.profile.mode)
         self.active_map = self.map_prediction = None
@@ -42,6 +44,8 @@ class Console:
         self.busy = self.running = False
         self.image = self.pending = self.mode = None
         self.box_edit = None
+        self.hud_box_edit = None
+        self.pending_available = None
         self.reviewing = False
         self.work_kind = None
         self.preview_revision = 0
@@ -101,6 +105,8 @@ class Console:
                                ("Calibrate super", lambda: self.set_mode("super")),
                                ("Calibrate gadget", lambda: self.set_mode("gadget")),
                                ("Calibrate hypercharge", lambda: self.set_mode("hypercharge")),
+                               ("Use detected centers", self.use_detected_controls),
+                               ("Label control", lambda: self.set_mode("hud")),
                                ("Label object", lambda: self.set_mode("label"))]:
             tk.Button(bar, text=label, command=command).pack(side="left")
         capture_bar = tk.Frame(self.root)
@@ -403,8 +409,12 @@ class Console:
         self.finish(terminal=True)
         active_map = self.active_map
         detector = self.detector
+        hud = getattr(self, "hud_detector", None)
+        control_snapshot, calibration = dict(self.controls), set(self.calibrated)
         def state_builder(image):
             detections = detector.detect(image)
+            if hud is not None:
+                detections += hud.detect(image, control_snapshot, calibration)
             return map_state(enemy_state(image, detections, detector.ready), active_map), detections
         if recording:
             self.reset_player_tasks()
@@ -486,8 +496,11 @@ class Console:
         self.cancel_box_edit(announce=False)
         self.finish(terminal=True)
         detector = self.detector
+        hud = getattr(self, "hud_detector", None)
         def state_builder(image):
             detections = detector.detect(image)
+            if hud is not None:
+                detections += hud.detect(image, metadata["controls"], metadata["calibrated"])
             return map_state(enemy_state(image, detections, detector.ready), metadata.get("map")), detections
         self.reset_player_tasks(saved=True)
         self.player_session = RecordingAnalysis(path, style, state_builder, offset, recognition_ready=detector.ready)
@@ -585,7 +598,7 @@ class Console:
         if self.busy:
             self.deferred_preview = (image, revision)
             return
-        self.work(lambda: (image, self.detector.detect(image)),
+        self.work(lambda: (image, self.detect_scene(image)),
                   lambda result: self.show_preview(result, revision), kind="preview")
 
     def configure_capture(self):
@@ -733,6 +746,7 @@ class Console:
             folder = profile.prepare()
             agent = Learner(folder / "policy.json")
             detector = EnemyDetector(folder)
+            hud_detector = HudDetector(folder)
             map_recognizer = MapRecognizer(self.training_root, profile.mode)
         except (OSError, ValueError) as error:
             self.status.set(str(error))
@@ -753,9 +767,11 @@ class Console:
         self.map_select.configure(values=self.map_recognizer.names)
         self.update_map_status()
         self.detector, self.detections = detector, []
+        self.hud_detector = hud_detector
         self.detection_status.set("Enemy detector: capture a frame for this profile.")
         self.mode = self.image = None
         self.box_edit = None
+        self.hud_box_edit = None
         self.canvas.delete("all")
         self.brawler_name.set(profile.brawler)
         self.mode_name.set(profile.mode)
@@ -814,11 +830,43 @@ class Console:
 
     def capture_frame(self):
         image = self.device.screenshot()
-        return image, self.detector.detect(image)
+        return image, self.detect_scene(image)
+
+    def detect_scene(self, image):
+        detections = self.detector.detect(image)
+        hud = getattr(self, "hud_detector", None)
+        if hud is not None:
+            detections += hud.detect(image, dict(self.controls), set(self.calibrated))
+        return detections
+
+    def use_detected_controls(self, automatic=False):
+        if not automatic:
+            self.pause()
+        if getattr(self, "player_session", None) is not None or (self.busy and not automatic):
+            return
+        changed = []
+        for item in self.detections:
+            if item.get("kind") != "control" or item.get("source") not in ("color_shape", "example"):
+                continue
+            control = item["control"]
+            if item["score"] < (.9 if automatic else .75) or (automatic and control in self.calibrated):
+                continue
+            changed.append(item)
+        if changed:
+            if not automatic:
+                self.finish(terminal=True)
+            for item in changed:
+                self.controls[item["control"]] = list(item["center"])
+                self.calibrated.add(item["control"])
+            self.controls["calibrated"] = sorted(self.calibrated)
+            self.save_controls()
+            if not automatic:
+                self.status.set("Saved detected centers: " + ", ".join(item["control"] for item in changed))
 
     def show(self, result):
         image, self.detections = result
         self.image = image
+        self.use_detected_controls(automatic=True)
         self.map_prediction = self.map_recognizer.predict(image)
         self.update_map_status()
         preview = image.copy()
@@ -830,13 +878,12 @@ class Console:
         w, h = self.preview_size
         for item in self.detections:
             x0, y0, x1, y1 = item["box"]
-            self.canvas.create_rectangle(x0*w, y0*h, x1*w, y1*h, outline="red", width=2)
-            identity = item.get("identity", "Unknown")
-            score = item.get("identity_score", 0)
-            self.canvas.create_text(min(x1*w + 4, w - 150), max(12, y0*h), anchor="nw", fill="red",
-                                    text=f"{identity}? {score:.2f}")
-        self.detection_status.set(f"Enemy matches: {len(self.detections)} | Examples: {len(self.detector.samples)}"
-                                  if self.detector.ready else "Enemy detector: label examples to begin.")
+            color = "cyan" if item.get("kind") == "control" else "red"
+            self.canvas.create_rectangle(x0*w, y0*h, x1*w, y1*h, outline=color, width=2)
+            self.canvas.create_text(min(x0*w, w - 200), max(12, y0*h), anchor="sw", fill=color, text=hud_label(item))
+        controls = [item for item in self.detections if item.get("kind") == "control"]
+        entities = len(self.detections)-len(controls)
+        self.detection_status.set(f"Entity matches: {entities} | Control boxes: {len(controls)} | Click a box to confirm/correct.")
 
     def capture(self):
         if self.player_guard():
@@ -871,8 +918,8 @@ class Console:
         self.cancel_box_edit()
         self.mode = mode
         self.canvas.configure(cursor="crosshair")
-        self.status.set("Labeling active: hold the left mouse button, drag a rectangle around the character in the preview, then release to choose its identity. Esc cancels."
-                        if mode in ("label", "enemy", "not_enemy") else "Click the center of the on-screen control.")
+        self.status.set("Labeling active: hold the left mouse button, draw a tight box, then release to choose its identity/state. Esc cancels."
+                        if mode in ("label", "enemy", "not_enemy", "hud") else "Click the center of the on-screen control.")
 
     def press(self, event):
         if self.player_guard():
@@ -890,7 +937,11 @@ class Console:
                     return
                 # Freeze the displayed frame immediately; late preview results are stale.
                 self.preview_revision += 1
-                self.review_detection(max(matches, key=lambda item: item["score"]))
+                item = max(matches, key=lambda item: (item.get("kind") == "control", item["score"]))
+                if item.get("kind") == "control":
+                    self.review_control(item)
+                else:
+                    self.review_detection(item)
             return
         if self.busy and self.work_kind != "preview":
             return
@@ -898,7 +949,7 @@ class Console:
         if not (0 <= event.x < w and 0 <= event.y < h):
             return
         self.origin = (event.x, event.y)
-        if self.mode not in ("label", "enemy", "not_enemy", "refine"):
+        if self.mode not in ("label", "enemy", "not_enemy", "refine", "hud"):
             self.finish(terminal=True)
             self.controls[self.mode] = [event.x / w, event.y / h]
             self.calibrated.add(self.mode)
@@ -913,17 +964,26 @@ class Console:
             self.box = self.canvas.create_rectangle(event.x, event.y, event.x, event.y, outline="lime", width=2)
 
     def drag(self, event):
-        if self.mode in ("label", "enemy", "not_enemy", "refine") and hasattr(self, "box"):
+        if self.mode in ("label", "enemy", "not_enemy", "refine", "hud") and hasattr(self, "box"):
             self.canvas.coords(self.box, *self.origin, event.x, event.y)
 
     def release(self, event):
-        if (self.busy and self.work_kind != "preview") or self.mode not in ("label", "enemy", "not_enemy", "refine") or not hasattr(self, "box"):
+        if (self.busy and self.work_kind != "preview") or self.mode not in ("label", "enemy", "not_enemy", "refine", "hud") or not hasattr(self, "box"):
             return
         w, h = self.preview_size
         x0, x1 = sorted((self.origin[0], max(0, min(event.x, w))))
         y0, y1 = sorted((self.origin[1], max(0, min(event.y, h))))
         if x1 - x0 < 3 or y1 - y0 < 3:
             self.status.set("Box is too small. Draw it again or cancel the box edit.")
+            return
+        if self.mode == "hud":
+            item = self.hud_box_edit or {"control": "move", "state": "unknown"}
+            result = self.control_dialog(item)
+            if result is not None:
+                control, state, _ = result
+                self.save_control_example([x0/w, y0/h, x1/w, y1/h], control, state)
+            self.hud_box_edit = None
+            self.cancel_box_edit(announce=False)
             return
         if self.mode == "refine":
             item, kind = self.box_edit
@@ -963,6 +1023,65 @@ class Console:
             return self.identity_dialog(suggestion, review)
         finally:
             self.reviewing = False
+
+    def control_dialog(self, item):
+        self.reviewing = True
+        try:
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Confirm control and availability")
+            dialog.transient(self.root)
+            tk.Label(dialog, text="Choose the control and the state visible in this frame.").pack(padx=16, pady=10)
+            control = tk.StringVar(value=item.get("control", "move"))
+            state = tk.StringVar(value=item.get("state", "unknown"))
+            ttk.Combobox(dialog, textvariable=control, values=CONTROLS, state="readonly").pack(padx=16, pady=6)
+            ttk.Combobox(dialog, textvariable=state, values=STATES, state="readonly").pack(padx=16, pady=6)
+            result = []
+            def accept(action):
+                result.append((control.get(), state.get(), action))
+                dialog.destroy()
+            tk.Button(dialog, text="Confirm center and learn state", command=lambda: accept("confirm")).pack(fill="x", padx=16)
+            if "box" in item:
+                tk.Button(dialog, text="Redraw control box", command=lambda: accept("redraw")).pack(fill="x", padx=16)
+                tk.Button(dialog, text="Not this control", command=lambda: accept("reject")).pack(fill="x", padx=16)
+            tk.Button(dialog, text="Cancel", command=dialog.destroy).pack(pady=8)
+            dialog.geometry(f"+{self.root.winfo_rootx()+40}+{self.root.winfo_rooty()+40}")
+            dialog.wait_visibility()
+            dialog.grab_set()
+            self.root.wait_window(dialog)
+            return result[0] if result else None
+        finally:
+            self.reviewing = False
+
+    def save_control_example(self, box, control, state):
+        self.finish(terminal=True)
+        try:
+            self.hud_detector.learn(self.image, box, control, state)
+            name = f"hud-frame-{time.time_ns()}.png"
+            self.image.save(self.folder/name)
+            self.log("hud-annotations.jsonl", {"image": name, "box": box, "control": control, "state": state})
+            if state != "rejected":
+                self.controls[control] = [(box[0]+box[2])/2, (box[1]+box[3])/2]
+                self.calibrated.add(control)
+                self.controls["calibrated"] = sorted(self.calibrated)
+                self.save_controls()
+            self.refresh_detection(self.image)
+            self.status.set(f"Saved {control} / {state}. Control recognition learns from this example.")
+        except (OSError, ValueError) as error:
+            self.status.set(str(error))
+
+    def review_control(self, item):
+        self.pause()
+        result = self.control_dialog(item)
+        if result is None:
+            return
+        control, state, action = result
+        if action == "redraw":
+            self.mode = "hud"
+            self.hud_box_edit = {"control": control, "state": state}
+            self.canvas.configure(cursor="crosshair")
+            self.status.set("Draw a tight box around the actual control, then confirm its state.")
+            return
+        self.save_control_example(item["box"], control, "rejected" if action == "reject" else state)
 
     def identity_dialog(self, suggestion="Unknown", review=False):
         dialog = tk.Toplevel(self.root)
@@ -1033,6 +1152,7 @@ class Console:
             self.canvas.delete(self.box)
             del self.box
         self.box_edit = None
+        self.hud_box_edit = None
         self.canvas.configure(cursor="")
         if announce:
             self.status.set("Selection cancelled. Capture, One AI step and labeling are available.")
@@ -1088,7 +1208,7 @@ class Console:
         if self.pending is None:
             return
         state, action, next_state = self.pending
-        available = available_actions(self.controls, self.calibrated)
+        available = getattr(self, "pending_available", None) or available_actions(self.controls, self.calibrated)
         self.agent.update(state, action, self.reward, next_state, terminal, available=available)
         self.log("transitions.jsonl", {"state": state, "action": ACTIONS[action], "reward": self.reward, "next_state": next_state, "terminal": terminal})
         self.agent.save()
@@ -1097,6 +1217,7 @@ class Console:
         if hasattr(self, "reward_status"):
             self.reward_status.set("Pending reward: +0")
         self.pending = None
+        self.pending_available = None
         if self.agent.steps % 20 == 0:
             self.refresh_recommendation()
 
@@ -1127,10 +1248,11 @@ class Console:
             return
         self.finish()
         state = map_state(enemy_state(self.image, self.detections, self.detector.ready), self.active_map)
-        action = self.agent.choose(state, available_actions(self.controls, self.calibrated))
+        available = available_actions(self.controls, self.calibrated, self.detections)
+        action = self.agent.choose(state, available)
         action_controls = self.controls
         if self.use_style.get() and random.random() < self.style_strength.get():
-            imitated = self.style.choose(state, available_actions(self.controls, self.calibrated))
+            imitated = self.style.choose(state, available)
             if imitated is not None:
                 action = imitated
                 action_controls = self.style.action_controls(state, ACTIONS[action], self.controls)
@@ -1143,6 +1265,7 @@ class Console:
         def complete(result):
             image, detections = result
             self.pending = (state, action, map_state(enemy_state(image, detections, self.detector.ready), self.active_map))
+            self.pending_available = available_actions(self.controls, self.calibrated, detections)
             self.show(result)
             detail = " (intentional no movement)" if name == "idle" else ""
             self.status.set(f"Completed: {name}{detail} | Learned transitions: {self.agent.steps} | Give feedback now.")
@@ -1179,6 +1302,7 @@ class Console:
         if self.busy:
             self.status.set("Wait for the current action, then mark episode end again.")
             return
+        self.cancel_box_edit(announce=False)
         self.finish(terminal=True)
         self.refresh_recommendation()
         self.image = None

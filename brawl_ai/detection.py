@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageStat
 from .profiles import BRAWLERS, normalize
+from .hud import hud_state
 
 ENTITY_NAMES = (*BRAWLERS, "NPC", "Showdown box")
 
@@ -163,7 +164,7 @@ def enemy_state(image, detections, ready):
     from .learning import state_key
     base = state_key(image)
     if not ready:
-        return base
+        return hud_state(base, detections)
     cells = sorted({min(2, int((item["box"][1] + item["box"][3]) * 1.5)) * 4
-                    + min(3, int((item["box"][0] + item["box"][2]) * 2)) for item in detections})
-    return base + "|enemy-v1:" + ",".join(map(str, cells))
+                    + min(3, int((item["box"][0] + item["box"][2]) * 2)) for item in detections if item.get("kind") != "control"})
+    return hud_state(base + "|enemy-v1:" + ",".join(map(str, cells)), detections)

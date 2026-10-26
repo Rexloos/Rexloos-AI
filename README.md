@@ -8,7 +8,7 @@ Python downloads and launches the official Android Emulator (QEMU); this project
 
 - Install official Android command-line tools, emulator and an Android 11 Google Play x86_64 image.
 - Launch a two-core, 2 GB RAM virtual device with a 720 × 1280 display and software graphics.
-- Capture the game through ADB and calibrate movement and attack controls visually.
+- Capture the game through ADB, propose control locations automatically, and confirm/correct calibration visually.
 - Start a tabular Q policy from zero, explore actions, learn from positive and negative human feedback, and resume saved learning.
 - Learn enemy appearance examples and false-detection corrections from human bounding boxes, then display matches and include their locations in policy states.
 - Observe the player's own USB phone gestures, save demonstrations, and optionally mix learned action preferences into AI decisions.
@@ -185,11 +185,23 @@ Preview refreshes do not perform AI actions, change pending transition states, a
 
 ### Super, gadget, hypercharge and reward sizes
 
-Pause, capture a frame, then use **Calibrate super**, **Calibrate gadget** or **Calibrate hypercharge** and click the corresponding button center in the preview. You can teach these controls gradually: an optional ability is excluded from AI choices until calibrated. Set **Super input** and **Gadget input** to `tap` for button activation/auto-aim, or `drag` for directional aiming. Drag mode exposes four separate actions (up, down, left, right), using a swipe of 10% of the smaller screen dimension. Hypercharge uses a tap. This does not detect charge, remaining gadget uses or ability availability in the game; feedback must teach when an action is useful. Live ability behavior has not yet been verified on a physical device.
+Pause and capture a frame. Controls are proposed automatically; use **Calibrate super**, **Calibrate gadget** or **Calibrate hypercharge** for manual center selection when needed. An optional ability is excluded from AI choices until calibrated or detected with sufficiently strong localization. Set **Super input** and **Gadget input** to `tap` for button activation/auto-aim, or `drag` for directional aiming. Drag mode exposes four separate actions (up, down, left, right), initially using a swipe of 10% of the smaller screen dimension. Hypercharge uses a tap. Availability proposals can exclude confidently recognized uncharged/cooldown abilities, as described below. Remaining gadget uses, exact charge percentages and numeric cooldown countdowns are not read. Live ability behavior has not yet been verified on a physical device.
 
 Calibration and super input mode are shared across profiles; recalibrate when the layout changes. Gadget input is saved separately for each brawler, shared across that brawler's game modes. On first opening a brawler without a saved gadget setting, the console asks whether the equipped gadget requires dragging. Answer Yes for drag or No for tap. Change this later using **Gadget input**, including when equipping a different gadget. Previously shared gadget settings are not assumed correct for a new brawler. Existing policies retain their learned values for the original actions; newly added actions start at zero.
 
 Enter a number under **Custom reward** and click **Add reward** after an AI step, for example `0.2` for a small improvement, `10` for completing an exercise, or `-5` for a mistake. Each click adds to the visible pending reward, including the existing +1/-1 buttons. **Clear pending reward** resets that sum before it is committed. Feedback applies to the most recently completed action, and is committed on the next step or episode end. Pause for more time to assess and reward an action. Larger magnitudes produce larger Q-value updates; recommendations still count positive/negative feedback rather than interpreting magnitude as mastery.
+
+### Automatic control boxes and availability
+
+Captures and analyzed replays show cyan boxes for **Movement joystick**, **Attack**, **Super**, **Gadget** and **Hypercharge**, separately from red entity boxes. Localization starts without pretrained weights: it proposes circular colored HUD regions, uses confirmed centers for dim controls, and can refine them using your own appearance examples. It is a heuristic with human correction, not a universal game UI detector. Strong proposals fill only missing calibration entries; existing calibrated centers are preserved. **Use detected centers** explicitly accepts proposals with a lower threshold, pauses AI stepping and saves the centers. Weak proposals need manual confirmation.
+
+The box labels include `ready`, `uncharged`, `cooldown`, `unavailable`, `visible` or `unknown`. Bright green gadget and bright purple hypercharge regions can suggest readiness; the super's blue/yellow appearance suggests uncharged/ready. These color rules are proposals, not calibrated probabilities. Dim gadget appearance alone cannot reliably distinguish cooldown from exhausted uses, so it carries a low-confidence question mark until examples help. Attack ammo and exact numeric cooldowns are not inferred.
+
+Click a cyan box to confirm or correct its control type and current state. **Confirm center and learn state** saves both the appearance example and the center. **Redraw control box** lets you replace inaccurate bounds. **Not this control** rejects a false proposal. **Label control** lets you draw a box around a missed control. You can teach gray gadget states as `cooldown` or `unavailable`, and super/hypercharge as `uncharged`. The detector keeps up to 12 examples per control/state in the active brawler/mode profile's `hud-detector.json`; source crops are logged in `hud-annotations.jsonl`. Examples and calibration persist after closing the console. Controls can be reviewed while a background preview is running, with the reviewed frame held fixed.
+
+HUD availability is included in learning state keys. Super, gadget and hypercharge actions (including directional variants) are excluded when both localization and uncharged/cooldown/unavailable evidence meet the confidence thresholds. Uncertain state proposals do not disable actions. Reward targets use availability from the original action-result frame, even if auto capture later updates the display. Existing learned values remain stored; newly enriched visual states start without values until taught. HUD boxes are never counted as enemies. Replay HUD proposals are sampled alongside entity proposals and saved separately in `control-proposals.json`; they work even before any enemy identities have been taught. Raw scrcpy recording remains free of detection work.
+
+Verification: all five control regions were inspected on a locally saved gameplay/control-edit screenshot, and automated tests cover synthetic location/state changes, persistence, correction, uncertain cooldown handling, action masking, calibration preservation and overlays. This is saved-frame verification, not manual verification of detection or availability during live Brawl Stars play. Visual effects, translucent controls, layouts and future HUD changes may require new examples.
 
 ### Teaching enemy recognition
 
@@ -239,6 +251,9 @@ Default layout:
         transitions.jsonl   # Transitions, rewards and profile names
         annotations.jsonl   # Image filenames, labels, normalized xyxy boxes
         enemy-detector.json # Human-taught appearance templates and corrections
+        hud-detector.json   # Per-profile control/state appearance examples
+        hud-annotations.jsonl # Confirmed/rejected HUD crops and availability states
+        hud-frame-*.png     # HUD teaching screenshots
         box-feedback.jsonl  # Original/corrected rectangles and rejection reasons
         map-examples.jsonl  # Confirmed map names and screenshot filenames
         map-frame-*.png     # Human-confirmed map examples
@@ -259,6 +274,7 @@ Default layout:
               replay.json  # Playback dimensions, timing and recognition status
               finger-actions.json # Finger positions, interpreted actions and drag status
               character-proposals.json # Sampled brawler/NPC proposals
+              control-proposals.json # Sampled control boxes and availability states
               replay-media.log # FFmpeg rendering diagnostics
         frame-*.png         # Annotated screenshots for this combination
 ```

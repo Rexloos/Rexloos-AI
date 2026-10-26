@@ -8,7 +8,7 @@ ACTIONS = ("idle", "up", "down", "left", "right", "attack", "super", "gadget", "
            "gadget_up", "gadget_down", "gadget_left", "gadget_right")
 
 
-def available_actions(controls, calibrated):
+def available_actions(controls, calibrated, detections=()):
     actions = list(range(6))
     for control in ("super", "gadget", "hypercharge"):
         if control not in calibrated:
@@ -17,7 +17,11 @@ def available_actions(controls, calibrated):
             actions.extend(i for i, name in enumerate(ACTIONS) if name.startswith(control + "_"))
         else:
             actions.append(ACTIONS.index(control))
-    return actions
+    blocked = {item["control"] for item in detections if item.get("kind") == "control"
+               and item.get("state") in ("uncharged", "cooldown", "unavailable")
+               and item.get("state_score", 0) >= .9 and item.get("score", 0) >= .75}
+    return [i for i in actions if not any(ACTIONS[i] == control or ACTIONS[i].startswith(control+"_")
+                                        for control in blocked if control in ("super", "gadget", "hypercharge"))]
 
 
 def state_key(image):
