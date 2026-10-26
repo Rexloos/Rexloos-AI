@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brawlstars-ai"
+version = "0.1.0"
+description = "Local Android emulator management and human-guided reinforcement learning"
+requires-python = ">=3.11"
+dependencies = ["Pillow>=10"]
+
+[project.scripts]
+brawl-ai = "brawl_ai.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["brawl_ai*"]
