@@ -38,6 +38,9 @@ class Console:
         self.image = self.pending = self.mode = None
         self.box_edit = None
         self.reviewing = False
+        self.work_kind = None
+        self.preview_revision = 0
+        self.deferred_preview = None
         self.reward = 0.0
         self.auto_job = None
         selector = tk.Frame(self.root)
@@ -167,10 +170,24 @@ class Console:
         return None
 
     def capture_preview(self, complete):
+        revision = self.preview_revision
         def received(result):
-            self.show(result)
+            self.show_preview(result, revision)
             complete()
-        self.work(self.capture_frame, received)
+        self.work(self.capture_frame, received, kind="preview")
+
+    def show_preview(self, result, revision):
+        if revision == self.preview_revision and not self.reviewing and not self.mode:
+            self.show(result)
+
+    def refresh_detection(self, image):
+        image = image.copy()
+        revision = self.preview_revision
+        if self.busy:
+            self.deferred_preview = (image, revision)
+            return
+        self.work(lambda: (image, self.detector.detect(image)),
+                  lambda result: self.show_preview(result, revision), kind="preview")
 
     def configure_capture(self):
         try:
@@ -304,6 +321,8 @@ class Console:
             self.status.set("This profile is already active.")
             return
         self.stop_capture()
+        self.preview_revision += 1
+        self.deferred_preview = None
         # Commit feedback to the old model before changing the active profile.
         self.finish(terminal=True)
         self.agent.save()
@@ -328,11 +347,12 @@ class Console:
         self.status.set("Profile loaded. Select the matching brawler and mode in the game manually, then capture.")
         self.load_gadget_mode()
 
-    def work(self, operation, callback):
+    def work(self, operation, callback, kind="device"):
         if self.busy:
             self.status.set("A device operation or detection is still running. Please wait.")
             return
         self.busy = True
+        self.work_kind = kind
         def worker():
             try:
                 self.events.put((callback, operation(), None))
@@ -344,6 +364,7 @@ class Console:
         try:
             callback, result, error = self.events.get_nowait()
             self.busy = False
+            self.work_kind = None
             if error:
                 self.pause()
                 self.stop_capture()
@@ -355,6 +376,11 @@ class Console:
         except Exception as error:
             self.callback_error(type(error), error, error.__traceback__)
         finally:
+            if not self.busy and not self.reviewing and self.deferred_preview is not None:
+                image, revision = self.deferred_preview
+                self.deferred_preview = None
+                if revision == self.preview_revision:
+                    self.refresh_detection(image)
             # A failed render/callback must not permanently stop the worker queue.
             self.root.after(100, self.poll)
 
@@ -401,7 +427,7 @@ class Console:
                 return
             self.cancel_box_edit()
             self.status.set("Capturing the device screen and checking detections...")
-            self.work(self.capture_frame, self.show)
+            self.capture_preview(lambda: None)
         else:
             self.status.set("Pause continuous training before using Capture.")
 
@@ -424,8 +450,6 @@ class Console:
                         if mode in ("label", "enemy", "not_enemy") else "Click the center of the on-screen control.")
 
     def press(self, event):
-        if self.busy:
-            return
         if not self.mode:
             if self.image is None:
                 return
@@ -434,7 +458,14 @@ class Console:
                        if item["box"][0] <= event.x/w <= item["box"][2]
                        and item["box"][1] <= event.y/h <= item["box"][3]]
             if matches:
+                if self.busy and self.work_kind != "preview":
+                    self.status.set("Wait for the current AI action before reviewing its result.")
+                    return
+                # Freeze the displayed frame immediately; late preview results are stale.
+                self.preview_revision += 1
                 self.review_detection(max(matches, key=lambda item: item["score"]))
+            return
+        if self.busy and self.work_kind != "preview":
             return
         w, h = self.preview_size
         if not (0 <= event.x < w and 0 <= event.y < h):
@@ -459,7 +490,7 @@ class Console:
             self.canvas.coords(self.box, *self.origin, event.x, event.y)
 
     def release(self, event):
-        if self.busy or self.mode not in ("label", "enemy", "not_enemy", "refine") or not hasattr(self, "box"):
+        if (self.busy and self.work_kind != "preview") or self.mode not in ("label", "enemy", "not_enemy", "refine") or not hasattr(self, "box"):
             return
         w, h = self.preview_size
         x0, x1 = sorted((self.origin[0], max(0, min(event.x, w))))
@@ -494,8 +525,7 @@ class Console:
                 self.finish(terminal=True)
                 try:
                     self.detector.learn(self.image, [x0/w, y0/h, x1/w, y1/h], label, identity)
-                    image = self.image.copy()
-                    self.work(lambda: (image, self.detector.detect(image)), self.show)
+                    self.refresh_detection(self.image)
                 except ValueError as error:
                     self.status.set(str(error))
         self.cancel_box_edit(announce=False)
@@ -563,8 +593,7 @@ class Console:
             self.image.save(self.folder / name)
             self.log("annotations.jsonl", {"image": name, "label": label, "identity": identity,
                                             "box": item["box"], "suggested_identity": item.get("identity", "Unknown")})
-            image = self.image.copy()
-            self.work(lambda: (image, self.detector.detect(image)), self.show)
+            self.refresh_detection(self.image)
             self.status.set("Identity feedback saved. Capture or resume when ready.")
         except (OSError, ValueError) as error:
             self.status.set(str(error))
@@ -593,8 +622,7 @@ class Console:
             if kind != "wrong":
                 self.log("annotations.jsonl", {"image": name, "label": "enemy", "identity": identity,
                                                 "box": corrected})
-            image = self.image.copy()
-            self.work(lambda: (image, self.detector.detect(image)), self.show)
+            self.refresh_detection(self.image)
             self.status.set("Box feedback saved. Capture or resume when ready.")
         except (OSError, ValueError) as error:
             self.status.set(str(error))

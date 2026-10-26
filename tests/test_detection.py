@@ -90,6 +90,8 @@ class DetectionTests(unittest.TestCase):
             for name in ("pause", "finish", "log", "work", "status"):
                 setattr(console, name, Mock())
             console.ask_identity = Mock(return_value=None)
+            console.busy = False
+            console.preview_revision = 0
             item = {"box": [0, 0, 1, 1], "identity": "Shelly", "score": 1}
             console.review_detection(item)
             self.assertFalse(console.detector.ready)

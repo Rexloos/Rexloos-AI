@@ -75,6 +75,9 @@ class CaptureTests(unittest.TestCase):
         console.device = Mock()
         console.work = Mock()
         console.show = Mock()
+        console.preview_revision = 0
+        console.reviewing = False
+        console.mode = None
         complete = Mock()
         console.capture_preview(complete)
         operation, callback = console.work.call_args.args

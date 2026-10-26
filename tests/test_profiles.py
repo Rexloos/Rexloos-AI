@@ -53,6 +53,8 @@ class ProfileTests(unittest.TestCase):
             console.calibrated = {"move", "attack"}
             console.busy = console.running = False
             console.auto_job = None
+            console.preview_revision = 0
+            console.deferred_preview = None
             console.image = object()
             console.mode = "label"
             for name in ("status", "profile_status", "recommendation_status", "detection_status", "canvas", "brawler_select", "mode_select", "map_name", "map_select", "map_status"):

@@ -99,16 +99,19 @@ class EnemyDetector:
         self.save()
 
     def detect(self, image):
-        if not self.ready:
+        # UI corrections replace these lists; an in-flight scan keeps one consistent view.
+        samples = tuple(self.samples)
+        rejected_boxes = tuple(self.rejected_boxes)
+        if not any(sample["label"] == "enemy" for sample in samples):
             return []
         frame = image.convert("RGB")
         frame.thumbnail((320, 180))
         width, height = frame.size
-        positives = [sample for sample in self.samples if sample["label"] == "enemy"][-12:]
+        positives = [sample for sample in samples if sample["label"] == "enemy"][-12:]
         negatives = [Image.frombytes("RGB", (12, 12), bytes(sample["pixels"]))
-                     for sample in self.samples if sample["label"] == "not_enemy"]
+                     for sample in samples if sample["label"] == "not_enemy"]
         rejected = [(sample, Image.frombytes("RGB", (12, 12), bytes(sample["pixels"])))
-                    for sample in self.rejected_boxes]
+                    for sample in rejected_boxes]
         candidates = []
 
         def similarity(a, b):
@@ -148,7 +151,7 @@ class EnemyDetector:
             crop = frame.crop((round(box[0]*width), round(box[1]*height),
                                round(box[2]*width), round(box[3]*height))).resize((12, 12))
             named = [(similarity(Image.frombytes("RGB", (12, 12), bytes(sample["pixels"])), crop), sample["identity"])
-                     for sample in self.samples if sample["label"] == "enemy" and sample.get("identity")]
+                     for sample in samples if sample["label"] == "enemy" and sample.get("identity")]
             score, identity = max(named, key=lambda pair: pair[0]) if named else (0.0, "Unknown")
             item.update(identity=identity, identity_score=score)
         return selected

@@ -42,10 +42,62 @@ def console_fixture(folder):
     console.auto_capture_enabled = Mock()
     console.capture_status = Mock()
     console.reviewing = False
+    console.work_kind = None
+    console.preview_revision = 0
+    console.deferred_preview = None
     return console
 
 
 class UiActionTests(unittest.TestCase):
+    def test_click_reviews_displayed_box_without_waiting_for_preview(self):
+        with tempfile.TemporaryDirectory() as folder:
+            console = console_fixture(folder)
+            complete = Mock()
+            console.capture_preview(complete)
+            received = console.work.call_args.args[1]
+            console.busy = True
+            console.work_kind = "preview"
+            item = {"box": [.1, .1, .5, .9], "identity": "NPC", "score": .99}
+            console.detections = [item]
+            console.review_detection = Mock()
+            frame = console.image
+            console.press(SimpleNamespace(x=30, y=30))
+            console.review_detection.assert_called_once_with(item)
+            self.assertEqual(console.preview_revision, 1)
+            # The old result is allowed to finish, but cannot replace the reviewed frame.
+            received((Image.new("RGB", frame.size, "black"), []))
+            console.show.assert_not_called()
+            complete.assert_called_once()
+            self.assertIs(console.image, frame)
+
+    def test_click_waits_for_real_ai_action_but_explains_why(self):
+        with tempfile.TemporaryDirectory() as folder:
+            console = console_fixture(folder)
+            console.busy = True
+            console.work_kind = "device"
+            console.detections = [{"box": [0, 0, 1, 1], "score": 1}]
+            console.review_detection = Mock()
+            console.press(SimpleNamespace(x=30, y=30))
+            console.review_detection.assert_not_called()
+            self.assertIn("AI action", console.status.set.call_args.args[0])
+
+    def test_review_correction_queues_refresh_until_old_preview_finishes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            console = console_fixture(folder)
+            console.busy = True
+            console.work_kind = "preview"
+            console.ask_identity = Mock(return_value="NPC")
+            item = {"box": [20/160, 20/90, 60/160, 70/90], "score": .99, "identity": "Shelly"}
+            console.review_detection(item)
+            self.assertTrue(console.detector.ready)
+            self.assertIsNotNone(console.deferred_preview)
+            console.work.assert_not_called()
+            console.events = queue.Queue()
+            console.events.put((Mock(), None, None))
+            console.poll()
+            self.assertIsNone(console.deferred_preview)
+            self.assertEqual(console.work.call_args.kwargs["kind"], "preview")
+
     @patch("brawl_ai.ui.time.sleep")
     def test_one_step_exits_labeling_and_executes_exactly_one_device_action(self, sleep):
         with tempfile.TemporaryDirectory() as folder:
