@@ -15,14 +15,15 @@ from .profiles import Profile, choices
 from .curriculum import recommend
 from .detection import ENTITY_NAMES, EnemyDetector, enemy_state
 from .maps import MapRecognizer, map_state
-from .capture import CaptureLoop, capture_interval
+from .capture import capture_interval
 from .playstyle import Playstyle, PlayerSession
 from .recordings import (MatchRecording, RecordingAnalysis, video_tools, load_gestures,
                          video_info, action_requests, decode_frame)
-from .replay import TASKS, ReplayPlayer
+from .replay import ReplayPlayer
 from .hud import CONTROLS, STATES, HudDetector, hud_label
 from .player import PlayerDetector, merge_player
 from .activity import ActivityLog
+from .dashboard import build_dashboard
 
 
 class Console:
@@ -56,151 +57,9 @@ class Console:
         self.player_session = None
         self.reward = 0.0
         self.auto_job = None
-        selector = tk.Frame(self.root)
-        selector.pack()
-        self.brawler_name = tk.StringVar(value=self.profile.brawler)
-        self.mode_name = tk.StringVar(value=self.profile.mode)
-        tk.Label(selector, text="Brawler:").pack(side="left")
-        brawlers, modes = choices(self.training_root)
-        self.brawler_select = ttk.Combobox(selector, textvariable=self.brawler_name, values=brawlers)
-        self.brawler_select.pack(side="left")
-        tk.Label(selector, text="Mode:").pack(side="left")
-        self.mode_select = ttk.Combobox(selector, textvariable=self.mode_name, values=modes)
-        self.mode_select.pack(side="left")
-        tk.Button(selector, text="Load / create profile", command=self.switch_profile).pack(side="left")
-        self.profile_status = tk.StringVar()
-        tk.Label(self.root, textvariable=self.profile_status).pack()
-        maps = tk.Frame(self.root)
-        maps.pack()
-        tk.Label(maps, text="Map:").pack(side="left")
-        self.map_name = tk.StringVar()
-        self.map_select = ttk.Combobox(maps, textvariable=self.map_name, values=self.map_recognizer.names, width=24)
-        self.map_select.pack(side="left")
-        tk.Button(maps, text="Save map name", command=self.save_map_name).pack(side="left")
-        tk.Button(maps, text="Set / teach map", command=self.teach_map).pack(side="left")
-        tk.Button(maps, text="Confirm map suggestion", command=self.confirm_map).pack(side="left")
-        tk.Button(maps, text="Clear active map", command=self.clear_map).pack(side="left")
-        self.map_status = tk.StringVar(value="Active map: unassigned. Capture and enter its name.")
-        tk.Label(self.root, textvariable=self.map_status).pack()
-        self.update_profile_status()
-        self.status = tk.StringVar(value="Open the game manually, enter the training area, then capture and calibrate.")
-        self.root.report_callback_exception = self.callback_error
-        self.root.bind("<Escape>", lambda event: self.cancel_box_edit())
-        tk.Label(self.root, textvariable=self.status, wraplength=950).pack()
-        self.recommendation_status = tk.StringVar()
-        tk.Label(self.root, textvariable=self.recommendation_status, wraplength=950, justify="left").pack()
-        suggestions = tk.Frame(self.root)
-        suggestions.pack()
-        tk.Button(suggestions, text="Refresh recommendation", command=self.refresh_recommendation).pack(side="left")
-        tk.Button(suggestions, text="Load recommended profile", command=self.load_recommendation).pack(side="left")
-        self.refresh_recommendation()
-        self.preview_limit = (min(960, max(320, self.root.winfo_screenwidth() - 60)),
-                              min(540, max(180, self.root.winfo_screenheight() - 560)))
-        self.canvas = tk.Canvas(self.root, width=self.preview_limit[0], height=self.preview_limit[1], bg="#222222")
-        self.canvas.pack()
-        self.canvas.bind("<ButtonPress-1>", self.press)
-        self.canvas.bind("<B1-Motion>", self.drag)
-        self.canvas.bind("<ButtonRelease-1>", self.release)
-        bar = tk.Frame(self.root)
-        bar.pack()
-        for label, command in [("Capture", self.capture), ("Calibrate move", lambda: self.set_mode("move")),
-                               ("Calibrate attack", lambda: self.set_mode("attack")),
-                               ("Calibrate super", lambda: self.set_mode("super")),
-                               ("Calibrate gadget", lambda: self.set_mode("gadget")),
-                               ("Calibrate hypercharge", lambda: self.set_mode("hypercharge")),
-                               ("Use detected centers", self.use_detected_controls),
-                               ("Label control", lambda: self.set_mode("hud")),
-                               ("Label object", lambda: self.set_mode("label"))]:
-            tk.Button(bar, text=label, command=command).pack(side="left")
-        capture_bar = tk.Frame(self.root)
-        capture_bar.pack()
-        settings_path = self.training_root / "capture-settings.json"
-        try:
-            settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
-            seconds = capture_interval(settings.get("seconds", 2))
-            adaptive = bool(settings.get("adaptive", True))
-        except (OSError, ValueError, TypeError, AttributeError):
-            seconds, adaptive = 2.0, True
-        self.auto_capture_enabled = tk.BooleanVar(value=False)
-        self.capture_seconds = tk.StringVar(value=str(seconds))
-        self.capture_adaptive = tk.BooleanVar(value=adaptive)
-        tk.Checkbutton(capture_bar, text="Auto capture", variable=self.auto_capture_enabled,
-                       command=self.configure_capture).pack(side="left")
-        tk.Label(capture_bar, text="Interval / minimum (seconds):").pack(side="left")
-        tk.Spinbox(capture_bar, from_=0.2, to=60, increment=0.2, width=6,
-                   textvariable=self.capture_seconds).pack(side="left")
-        tk.Checkbutton(capture_bar, text="Adaptive", variable=self.capture_adaptive,
-                       command=self.configure_capture).pack(side="left")
-        tk.Button(capture_bar, text="Apply capture settings", command=self.configure_capture).pack(side="left")
-        self.capture_status = tk.StringVar(value="Auto capture: off")
-        tk.Label(self.root, textvariable=self.capture_status).pack()
-        self.capture_loop = CaptureLoop(self.root, self.capture_preview, self.capture_blocked, self.capture_status.set)
-        self.player_name = tk.StringVar(value="Player 1")
-        self.use_style = tk.BooleanVar(value=False)
-        self.style_strength = tk.DoubleVar(value=.7)
-        self.touch_rotation = tk.StringVar(value="90")
-        self.demo_interval = tk.StringVar(value="0.5")
-        self.video_fps = tk.StringVar(value="30")
-        self.recording_name = tk.StringVar()
-        self.sync_offset = tk.StringVar(value="0")
-        self.review_action = tk.IntVar(value=1)
-        self.touch_auto = tk.BooleanVar(value=True)
-        self.player_phase = tk.StringVar(value="Ready to record a game")
-        self.player_progress = tk.DoubleVar(value=0)
-        self.player_bar = self.player_dialog = None
-        self.auto_analyze = False
-        self.player_tasks = {key: {"label": label, "value": tk.DoubleVar(value=0),
-                                  "text": tk.StringVar(value="Waiting"), "state": "waiting"}
-                             for key, label in TASKS}
-        self.task_bars = {}
-        self.style = Playstyle(self.folder, self.player_name.get())
-        self.style_status = tk.StringVar(value=f"Player style: {self.style.examples} examples | imitation off")
-        style_bar = tk.Frame(self.root)
-        style_bar.pack()
-        tk.Button(style_bar, text="Learn player playstyle...", command=self.player_window).pack(side="left")
-        tk.Label(style_bar, textvariable=self.style_status).pack(side="left")
-        options = tk.Frame(self.root)
-        options.pack()
-        self.control_modes = {}
-        for control in ("super", "gadget"):
-            tk.Label(options, text=f"{control.title()} input:").pack(side="left")
-            variable = tk.StringVar(value=self.controls.get(control + "_mode", "tap"))
-            self.control_modes[control] = variable
-            selector = ttk.Combobox(options, textvariable=variable, values=("tap", "drag"), state="readonly", width=6)
-            selector.pack(side="left")
-            selector.bind("<<ComboboxSelected>>", self.save_control_modes)
-        bar = tk.Frame(self.root)
-        bar.pack()
-        for label, command in [("One AI step", self.one_step),
-                               ("Start", self.start), ("Pause", self.pause),
-                               ("Reward +1", lambda: self.feedback(1)), ("Penalty -1", lambda: self.feedback(-1)),
-                               ("Episode ended", self.terminal)]:
-            tk.Button(bar, text=label, command=command).pack(side="left")
-        rewards = tk.Frame(self.root)
-        rewards.pack()
-        tk.Label(rewards, text="Custom reward (positive or negative):").pack(side="left")
-        self.reward_input = tk.StringVar(value="10")
-        tk.Entry(rewards, textvariable=self.reward_input, width=10).pack(side="left")
-        tk.Button(rewards, text="Add reward", command=self.custom_feedback).pack(side="left")
-        tk.Button(rewards, text="Clear pending reward", command=self.clear_feedback).pack(side="left")
-        self.reward_status = tk.StringVar(value="Pending reward: +0")
-        tk.Label(rewards, textvariable=self.reward_status).pack(side="left")
-        detection_bar = tk.Frame(self.root)
-        detection_bar.pack()
-        tk.Button(detection_bar, text="Label enemy", command=lambda: self.set_mode("enemy")).pack(side="left")
-        tk.Button(detection_bar, text="Label player", command=lambda: self.set_mode("player")).pack(side="left")
-        tk.Button(detection_bar, text="Label false detection", command=lambda: self.set_mode("not_enemy")).pack(side="left")
-        tk.Button(detection_bar, text="Cancel selection (Esc)", command=self.cancel_box_edit).pack(side="left")
-        self.detection_status = tk.StringVar(value="Enemy detector: label examples to begin.")
-        tk.Label(detection_bar, textvariable=self.detection_status).pack(side="left")
-        tk.Label(self.root, text="Click a detected box to confirm or correct it. Label enemy teaches brawlers, NPCs and Showdown boxes.").pack()
+        build_dashboard(self)
         self.activity = ActivityLog(self.training_root/"logs")
         self.activity_window = self.activity_text = None
-        self.activity_summary = tk.StringVar(value="Activity logging started")
-        activity_bar = tk.Frame(self.root)
-        activity_bar.pack(fill="x")
-        tk.Button(activity_bar, text="Activity log", command=self.open_activity_log).pack(side="left")
-        tk.Label(activity_bar, textvariable=self.activity_summary, anchor="w", wraplength=850).pack(side="left")
         for name in ("status", "style_status", "player_phase", "capture_status", "detection_status", "profile_status", "reward_status", "map_status"):
             variable = getattr(self, name)
             variable.trace_add("write", lambda *args, name=name, variable=variable:
@@ -210,6 +69,21 @@ class Console:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(100, self.poll)
         self.load_gadget_mode()
+
+    def resize_preview(self, event):
+        if getattr(self, "preview_resize_job", None) is not None:
+            self.root.after_cancel(self.preview_resize_job)
+        # Keep coordinates stable while a rectangle is being drawn or reviewed.
+        if self.mode or self.reviewing:
+            return
+        def resize():
+            self.preview_resize_job = None
+            if self.mode or self.reviewing:
+                return
+            self.preview_limit = (max(1, event.width), max(1, event.height))
+            if self.image is not None:
+                self.render_preview()
+        self.preview_resize_job = self.root.after(120, resize)
 
     def open_activity_log(self):
         if self.activity_window is not None and self.activity_window.winfo_exists():
@@ -943,7 +817,14 @@ class Console:
         self.use_detected_controls(automatic=True)
         self.map_prediction = self.map_recognizer.predict(image)
         self.update_map_status()
-        preview = image.copy()
+        self.render_preview()
+        controls = [item for item in self.detections if item.get("kind") == "control"]
+        own = [item for item in self.detections if item.get("kind") == "player"]
+        entities = len(self.detections)-len(controls)-len(own)
+        self.detection_status.set(f"Entity matches: {entities} | Player: {'found' if own else 'unknown'} | Controls: {len(controls)} | Click to review.")
+
+    def render_preview(self):
+        preview = self.image.copy()
         preview.thumbnail(self.preview_limit)
         self.preview_size = preview.size
         self.photo = ImageTk.PhotoImage(preview)
@@ -954,11 +835,7 @@ class Console:
             x0, y0, x1, y1 = item["box"]
             color = "cyan" if item.get("kind") == "control" else "lime" if item.get("kind") == "player" else "red"
             self.canvas.create_rectangle(x0*w, y0*h, x1*w, y1*h, outline=color, width=2)
-            self.canvas.create_text(min(x0*w, w - 200), max(12, y0*h), anchor="sw", fill=color, text=hud_label(item))
-        controls = [item for item in self.detections if item.get("kind") == "control"]
-        own = [item for item in self.detections if item.get("kind") == "player"]
-        entities = len(self.detections)-len(controls)-len(own)
-        self.detection_status.set(f"Entity matches: {entities} | Player: {'found' if own else 'unknown'} | Controls: {len(controls)} | Click to review.")
+            self.canvas.create_text(max(0, min(x0*w, w - 200)), max(12, y0*h), anchor="sw", fill=color, text=hud_label(item))
 
     def capture(self):
         if self.player_guard():

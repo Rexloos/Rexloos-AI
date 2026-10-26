@@ -132,11 +132,20 @@ To select a profile directly without the launcher:
 python -m brawl_ai teach --brawler "Shelly" --mode "Solo Showdown"
 ```
 
+The console uses a resizable workspace: the game preview stays on the left and scrollable **Train**, **Teach** and **Setup** tabs stay on the right. **Capture** is always above the preview; the current instruction and activity summary remain in the footer. Drag the divider to adjust the space allocated to the preview and controls. The preview scales to fit while preserving its aspect ratio. Resizing is deferred during a box selection or review so annotation coordinates remain stable.
+
+- **Setup:** brawler/mode profile, control-center calibration, tap/drag settings and automatic capture. It opens first when movement/attack have not been calibrated.
+- **Train:** single-step/continuous AI, rewards, playstyle recording and training recommendations.
+- **Teach:** player/enemy/object labels, control availability examples and map identity. Click existing boxes in the preview to confirm or correct them.
+- **Activity log:** always accessible in the header; opens the timestamped history.
+
+Automated desktop smoke checks exercised all three tabs, preview rendering, resizing from 1320 × 900 to 950 × 650 and opening the activity viewer with a temporary profile and synthetic image. The full automated test suite also passes. Actual-game interaction with the redesigned workspace has not been manually verified.
+
 1. Open the game and enter its training area manually. Use landscape orientation.
 2. Click **Capture**. Calibrate **move** at the joystick center and **attack** at the attack button center. Recalibrate after changing resolution or orientation.
 3. Click **One AI step**. This pauses continuous training, exits unfinished ordinary labeling/calibration and executes exactly one action. A box refinement must be finished or cancelled first. The policy starts without pretrained weights or demonstrations and initially explores randomly. The status line shows the selected action while it is running and confirms completion; `idle` intentionally makes no movement. Missing calibration and busy operations produce an explicit message instead of silently ignoring the click.
 4. Click **Reward +1** or **Penalty -1** to evaluate the displayed transition. Feedback applies to the most recently completed action, not a historical action. Multiple clicks add together. With no feedback the reward is zero.
-5. The next step commits that feedback and updates the policy. **Start** repeats steps with a 1.5-second feedback window after each captured result. **Pause** stops scheduling new actions; an in-flight action finishes.
+5. The next step commits that feedback and updates the policy. **Start AI** repeats steps with a 1.5-second feedback window after each captured result. **Pause AI** stops scheduling new actions; an in-flight action finishes.
 6. At a death or episode boundary, pause, wait for the in-flight action, assign the final reward and click **Episode ended**. Reset the game manually, then capture again. This prevents bootstrapping across episode boundaries.
 7. To explain what objects are, pause, capture, choose **Label object**, drag a rectangle and enter an English name such as `enemy`, `wall` or `health_bar`. The `enemy` and `not_enemy` labels train the appearance matcher immediately; other labels are saved for future recognition work. Use **Label player** for your controlled character and **Label enemy** for other entities.
 
