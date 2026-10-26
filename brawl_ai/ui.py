@@ -1,6 +1,7 @@
 """Desktop teaching console. Device work stays off Tk's UI thread."""
 import json
 import math
+import traceback
 import queue
 import threading
 import time
@@ -64,6 +65,8 @@ class Console:
         tk.Label(self.root, textvariable=self.map_status).pack()
         self.update_profile_status()
         self.status = tk.StringVar(value="Open the game manually, enter the training area, then capture and calibrate.")
+        self.root.report_callback_exception = self.callback_error
+        self.root.bind("<Escape>", lambda event: self.cancel_box_edit())
         tk.Label(self.root, textvariable=self.status, wraplength=950).pack()
         self.recommendation_status = tk.StringVar()
         tk.Label(self.root, textvariable=self.recommendation_status, wraplength=950, justify="left").pack()
@@ -98,7 +101,7 @@ class Console:
             selector.bind("<<ComboboxSelected>>", self.save_control_modes)
         bar = tk.Frame(self.root)
         bar.pack()
-        for label, command in [("One AI step", self.step),
+        for label, command in [("One AI step", self.one_step),
                                ("Start", self.start), ("Pause", self.pause),
                                ("Reward +1", lambda: self.feedback(1)), ("Penalty -1", lambda: self.feedback(-1)),
                                ("Episode ended", self.terminal)]:
@@ -116,7 +119,7 @@ class Console:
         detection_bar.pack()
         tk.Button(detection_bar, text="Label enemy", command=lambda: self.set_mode("enemy")).pack(side="left")
         tk.Button(detection_bar, text="Label false detection", command=lambda: self.set_mode("not_enemy")).pack(side="left")
-        tk.Button(detection_bar, text="Cancel box edit", command=self.cancel_box_edit).pack(side="left")
+        tk.Button(detection_bar, text="Cancel selection (Esc)", command=self.cancel_box_edit).pack(side="left")
         self.detection_status = tk.StringVar(value="Enemy detector: label examples to begin.")
         tk.Label(detection_bar, textvariable=self.detection_status).pack(side="left")
         tk.Label(self.root, text="Click a detected box to confirm or correct its identity. Label enemy teaches a new character or NPC.").pack()
@@ -262,6 +265,7 @@ class Console:
 
     def work(self, operation, callback):
         if self.busy:
+            self.status.set("A device operation or detection is still running. Please wait.")
             return
         self.busy = True
         def worker():
@@ -276,13 +280,23 @@ class Console:
             callback, result, error = self.events.get_nowait()
             self.busy = False
             if error:
-                self.running = False
-                self.status.set(error)
+                self.pause()
+                self.status.set(f"Operation failed: {error}. Retry Capture after checking the device.")
             else:
                 callback(result)
         except queue.Empty:
             pass
-        self.root.after(100, self.poll)
+        except Exception as error:
+            self.callback_error(type(error), error, error.__traceback__)
+        finally:
+            # A failed render/callback must not permanently stop the worker queue.
+            self.root.after(100, self.poll)
+
+    def callback_error(self, error_type, error, trace):
+        self.pause()
+        self.cancel_box_edit()
+        traceback.print_exception(error_type, error, trace)
+        self.status.set(f"Console error: {error}. Details are in the terminal; try Capture again.")
 
     def capture_frame(self):
         image = self.device.screenshot()
@@ -315,17 +329,31 @@ class Console:
             self.status.set("Finish drawing the corrected box or cancel the box edit first.")
             return
         if not self.running:
+            if self.busy:
+                self.status.set("Capture is waiting for the current device operation or detection. Please wait.")
+                return
+            self.cancel_box_edit()
+            self.status.set("Capturing the device screen and checking detections...")
             self.work(self.capture_frame, self.show)
+        else:
+            self.status.set("Pause continuous training before using Capture.")
 
     def set_mode(self, mode):
         self.pause()
-        if self.busy or self.image is None:
-            self.status.set("Wait for the current step and capture a frame first.")
+        if self.busy:
+            self.status.set("Wait for the current device operation or detection, then click the labeling button again.")
             return
-        if self.mode == "refine":
-            self.cancel_box_edit()
+        if self.image is None:
+            self.status.set("Capturing a frame before selecting the control or character...")
+            def ready(result):
+                self.show(result)
+                self.set_mode(mode)
+            self.work(self.capture_frame, ready)
+            return
+        self.cancel_box_edit()
         self.mode = mode
-        self.status.set("Drag a tight box around the character or false detection."
+        self.canvas.configure(cursor="crosshair")
+        self.status.set("Labeling active: hold the left mouse button, drag a rectangle around the character in the preview, then release to choose its identity. Esc cancels."
                         if mode in ("label", "enemy", "not_enemy") else "Click the center of the on-screen control.")
 
     def press(self, event):
@@ -353,7 +381,10 @@ class Console:
             self.save_controls()
             self.status.set(f"Saved {self.mode} control.")
             self.mode = None
+            self.canvas.configure(cursor="")
         else:
+            if hasattr(self, "box"):
+                self.canvas.delete(self.box)
             self.box = self.canvas.create_rectangle(event.x, event.y, event.x, event.y, outline="lime", width=2)
 
     def drag(self, event):
@@ -361,7 +392,7 @@ class Console:
             self.canvas.coords(self.box, *self.origin, event.x, event.y)
 
     def release(self, event):
-        if self.mode not in ("label", "enemy", "not_enemy", "refine") or not hasattr(self, "box"):
+        if self.busy or self.mode not in ("label", "enemy", "not_enemy", "refine") or not hasattr(self, "box"):
             return
         w, h = self.preview_size
         x0, x1 = sorted((self.origin[0], max(0, min(event.x, w))))
@@ -375,7 +406,7 @@ class Console:
             if identity is not None:
                 self.save_box_feedback(item, "wrong" if identity == "not_enemy" else kind,
                                        [x0/w, y0/h, x1/w, y1/h], identity)
-            self.cancel_box_edit()
+            self.cancel_box_edit(announce=False)
             return
         label = self.mode if self.mode != "label" else simpledialog.askstring(
             "Object label", "English label (e.g. player, enemy, health_bar):", parent=self.root)
@@ -400,9 +431,7 @@ class Console:
                     self.work(lambda: (image, self.detector.detect(image)), self.show)
                 except ValueError as error:
                     self.status.set(str(error))
-        self.mode = None
-        self.canvas.delete(self.box)
-        del self.box
+        self.cancel_box_edit(announce=False)
 
     def ask_identity(self, suggestion="Unknown", review=False):
         dialog = tk.Toplevel(self.root)
@@ -431,6 +460,8 @@ class Console:
             tk.Button(dialog, text="Box too broad", command=lambda: accept("__too_broad__")).pack(fill="x", padx=16)
             tk.Button(dialog, text="Box completely wrong", command=lambda: accept("__wrong__")).pack(fill="x", padx=16)
         tk.Button(dialog, text="Cancel", command=dialog.destroy).pack(pady=8)
+        dialog.geometry(f"+{self.root.winfo_rootx() + 40}+{self.root.winfo_rooty() + 40}")
+        dialog.wait_visibility()
         dialog.grab_set()
         selector.focus_set()
         self.root.wait_window(dialog)
@@ -464,14 +495,17 @@ class Console:
         except (OSError, ValueError) as error:
             self.status.set(str(error))
 
-    def cancel_box_edit(self):
-        if self.mode != "refine":
+    def cancel_box_edit(self, announce=True):
+        if not self.mode:
             return
         self.mode = None
         if hasattr(self, "box"):
             self.canvas.delete(self.box)
             del self.box
         self.box_edit = None
+        self.canvas.configure(cursor="")
+        if announce:
+            self.status.set("Selection cancelled. Capture, One AI step and labeling are available.")
 
     def save_box_feedback(self, item, kind, corrected=None, identity=None):
         self.finish(terminal=True)
@@ -537,27 +571,44 @@ class Console:
         if self.agent.steps % 20 == 0:
             self.refresh_recommendation()
 
+    def one_step(self):
+        self.pause()
+        self.step()
+
     def step(self):
-        if self.busy or self.mode:
+        if self.busy:
+            self.status.set("An action, capture or detection is still running. Please wait.")
             return
+        if self.mode == "refine":
+            self.status.set("Finish the corrected box or click Cancel selection (Esc) before an AI step.")
+            self.running = False
+            return
+        # An explicit action request exits unfinished labeling or calibration.
+        self.cancel_box_edit()
         if self.image is None:
             self.status.set("Capture a frame and calibrate controls first.")
+            self.running = False
             return
         if not {"move", "attack"}.issubset(self.calibrated):
-            self.status.set("Calibrate move and attack controls before training.")
+            missing = sorted({"move", "attack"} - self.calibrated)
+            self.status.set("Calibrate these controls before training: " + ", ".join(missing))
             self.running = False
             return
         self.finish()
         state = map_state(enemy_state(self.image, self.detections, self.detector.ready), self.active_map)
         action = self.agent.choose(state, available_actions(self.controls, self.calibrated))
+        name = ACTIONS[action]
+        self.status.set(f"Executing AI action: {name}. Waiting for the device and updated detections...")
         def execute():
             self.device.action(ACTIONS[action], self.image.size, self.controls)
             time.sleep(0.15)
             return self.capture_frame()
         def complete(result):
+            image, detections = result
+            self.pending = (state, action, map_state(enemy_state(image, detections, self.detector.ready), self.active_map))
             self.show(result)
-            self.pending = (state, action, map_state(enemy_state(self.image, self.detections, self.detector.ready), self.active_map))
-            self.status.set(f"Action: {ACTIONS[action]} | Learned transitions: {self.agent.steps} | Give feedback now.")
+            detail = " (intentional no movement)" if name == "idle" else ""
+            self.status.set(f"Completed: {name}{detail} | Learned transitions: {self.agent.steps} | Give feedback now.")
             if self.running:
                 self.auto_job = self.root.after(1500, self.auto_step)
         self.work(execute, complete)
@@ -568,7 +619,11 @@ class Console:
             self.step()
 
     def start(self):
-        if self.busy or self.mode or self.running:
+        if self.running:
+            self.status.set("Continuous training is already running. Pause to stop it.")
+            return
+        if self.busy:
+            self.status.set("Wait for the current device operation or detection before starting.")
             return
         self.running = True
         self.step()
