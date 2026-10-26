@@ -1,5 +1,6 @@
 """Activity retention and rate limits without requiring a desktop."""
 from pathlib import Path
+from io import StringIO
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -8,6 +9,19 @@ from brawl_ai.activity import ActivityLog
 
 
 class ActivityTests(unittest.TestCase):
+    def test_console_output_is_immediate_and_survives_file_failure(self):
+        with tempfile.TemporaryDirectory() as root, patch("sys.stdout", new_callable=StringIO) as output:
+            log = ActivityLog(Path(root))
+            log.add("progress", "Learning")
+            self.assertEqual(output.getvalue(), log.snapshot()[0] + "\n")
+            log.add("progress", "Learning")
+            self.assertEqual(len(output.getvalue().splitlines()), 1)
+            log.failed()
+            log.add("error", "Disk unavailable")
+            self.assertIn("[error] Disk unavailable\n", output.getvalue())
+            self.assertNotIn("Disk unavailable", log.path.read_text())
+            log.close()
+
     def test_rate_limit_duplicates_and_idle_heartbeat(self):
         with tempfile.TemporaryDirectory() as root:
             log = ActivityLog(Path(root))

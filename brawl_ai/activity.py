@@ -3,6 +3,7 @@ from collections import deque
 from datetime import datetime
 import logging
 from logging.handlers import RotatingFileHandler
+import sys
 import time
 import threading
 
@@ -21,9 +22,13 @@ class ActivityLog:
             handler.setFormatter(logging.Formatter("%(message)s"))
             # Logging failures must not interrupt learning or print on every tick.
             handler.handleError = lambda record: self.failed()
+            handler.addFilter(lambda record: not self.failure)
             self.logger.addHandler(handler)
         except OSError:
             self.failed()
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(logging.Formatter("%(message)s"))
+        self.logger.addHandler(console)
 
     def failed(self):
         self.failure = "File logging unavailable; activity remains visible in this session."
@@ -45,8 +50,7 @@ class ActivityLog:
         self.last[source] = (now, message)
         line = f"{datetime.now().astimezone().isoformat(timespec='seconds')} [{source}] {message}"
         self.lines.append(line)
-        if not self.failure:
-            self.logger.info(line)
+        self.logger.info(line)
 
     def close(self):
         for handler in self.logger.handlers[:]:

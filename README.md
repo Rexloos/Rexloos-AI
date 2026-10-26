@@ -178,6 +178,8 @@ Timing is estimated automatically from device/host input timestamps and the vide
 
 ### Activity log
 
+Activity entries also print immediately to standard output in the terminal that launched the application, with the same timestamps and throttling as the viewer. Console output continues if file logging becomes unavailable.
+
 The main console continuously shows the active profile, AI running/paused state, device operation and its elapsed time, player recording/analysis activity, and capture blocking reason. **Activity log** opens a scrolling history with local timestamps. Status changes, analysis progress, model-save messages, rewards, map/profile changes, operation completion times and errors are logged automatically. Repeated progress is throttled; a heartbeat is recorded every 15 seconds, including while idle. A heartbeat reports the UI's known state, not proof that a device or external media process is responsive. If Tk itself freezes, its heartbeat also stops.
 
 Logs survive restarts in `training/logs/activity.log` inside the local cache. Rotation keeps the active file and three backups of approximately 2 MiB each (about 8 MiB total). The viewer retains the latest 500 entries from the current session; older entries remain in the rotated files until overwritten. If file logging fails, the current session history remains available in the viewer. Logs can contain profile/map names, local paths and error details. Automated tests verify rotation, bounded history, throttling, repeated heartbeats and file-failure handling; the desktop viewer has not been manually verified.
